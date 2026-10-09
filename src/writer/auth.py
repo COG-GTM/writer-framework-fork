@@ -1,10 +1,13 @@
 import asyncio
+import base64
+import binascii
 import dataclasses
+import hmac
 import logging
 import os.path
 import time
 from abc import ABCMeta, abstractmethod
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, Optional, Tuple
 from urllib.parse import urlparse
 
 from authlib.integrations.requests_client.oauth2_session import OAuth2Session  # type: ignore
@@ -84,13 +87,26 @@ class BasicAuth(Auth):
     >>>     delay_after_failure=5,
     >>>     block_user_after_failure=False
     >>> )
+
+    Callback
+    --------
+
+    A `callback` passed to `register_auth` is an additional authorization step. It runs only
+    after the submitted credentials match `login` and `password`, and can reject the
+    user by raising `Unauthorized`. It never replaces the password check.
+
+    >>> def check_user(request, session_id, userinfo):
+    >>>     if userinfo['username'] not in allowed_users:
+    >>>         raise writer.auth.Unauthorized()
+    >>>
+    >>> writer.serve.register_auth(_auth, callback=check_user)
     """
     login: str
     password: str
     delay_after_failure: int = 1  # limit attempt when authentication fail (reduce brute force risk)
     block_user_after_failure: bool = True  # delay the answer to the user after a failed login
 
-    callback_func: Optional[Callable[[Request, str, dict], None]] = None  # Callback to validate user authentication
+    callback_func: Optional[Callable[[Request, str, dict], None]] = None  # Extra authorization step, runs after login/password are verified
     unauthorized_action: Optional[Callable[[Request, Unauthorized], Response]] = None  # Callback to build its own page when a user is not allowed
 
 
@@ -104,7 +120,6 @@ class BasicAuth(Auth):
 
         @asgi_app.middleware("http")
         async def basicauth_middleware(request: Request, call_next):
-            import base64
             client_ip = _client_ip(request)
 
             try:
@@ -121,12 +136,12 @@ class BasicAuth(Auth):
                 if scheme != 'Basic':
                     return HTMLResponse("", status.HTTP_401_UNAUTHORIZED, {"WWW-Authenticate": "Basic"})
 
-                username, password = base64.b64decode(data).decode().split(':', 1)
+                username, password = _decode_basic_credentials(data)
+                if not self._credentials_match(username, password):
+                    raise Unauthorized()
+
                 if self.callback_func:
                     self.callback_func(request, session_id, {'username': username})
-                else:
-                    if username != self.login or password != self.password:
-                        raise Unauthorized()
 
                 return await call_next(request)
             except Unauthorized as exc:
@@ -145,6 +160,23 @@ class BasicAuth(Auth):
                         "message": exc.message,
                         "more_info": exc.more_info
                     })
+
+    def _credentials_match(self, username: str, password: str) -> bool:
+        if not self.login or not self.password:
+            return False
+
+        login_ok = hmac.compare_digest(username.encode(), self.login.encode())
+        password_ok = hmac.compare_digest(password.encode(), self.password.encode())
+        return login_ok and password_ok
+
+
+def _decode_basic_credentials(data: str) -> Tuple[str, str]:
+    try:
+        username, password = base64.b64decode(data, validate=True).decode().split(':', 1)
+    except (binascii.Error, UnicodeDecodeError, ValueError):
+        raise Unauthorized()
+    return username, password
+
 
 @dataclasses.dataclass
 class Oidc(Auth):
