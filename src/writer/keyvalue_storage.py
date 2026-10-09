@@ -1,7 +1,7 @@
 import logging
 import os
 from functools import partial
-from typing import Any, Dict, List, Literal, Optional, Protocol
+from typing import Any, Dict, List, Literal, Optional, Protocol, Tuple
 
 import httpx
 
@@ -26,6 +26,11 @@ class KeyValueStorage:
 
         self._client = client if client is not None else httpx
 
+    @staticmethod
+    def deployment_agent_ids() -> Tuple[Optional[str], Optional[str]]:
+        """Agent and org ids configured for this deployment, ignoring request headers."""
+        return (os.getenv("WRITER_APP_ID"), os.getenv("WRITER_ORG_ID"))
+
     def _get_agent_ids(self):
         from writer.core import get_session
         current_session = get_session()
@@ -40,8 +45,16 @@ class KeyValueStorage:
         org_id = os.getenv("WRITER_ORG_ID")
         return (agent_id, org_id)
 
-    def get(self, key: str, type_: Literal["data", "secret"]) -> Dict[str, Any]:
-        return self._request(partial(self._client.get, url=f"{self.api_url}/agent_{type_}/{key}")).json()
+    def get(
+        self,
+        key: str,
+        type_: Literal["data", "secret"],
+        agent_ids: Optional[Tuple[Optional[str], Optional[str]]] = None,
+    ) -> Dict[str, Any]:
+        return self._request(
+            partial(self._client.get, url=f"{self.api_url}/agent_{type_}/{key}"),
+            agent_ids=agent_ids,
+        ).json()
 
     def get_data_keys(self) -> List[str]:
         return self._request(partial(self._client.get, url=f"{self.api_url}/agent_data")).json()["keys"]
@@ -64,10 +77,13 @@ class KeyValueStorage:
         self._request(partial(self._client.delete, url=f"{self.api_url}/agent_data/{key}"))
         return {"key": key}
 
-    def _request(self, request_func: _WrappedRequestFunc) -> httpx.Response:
-
-        agent_id, org_id = self._get_agent_ids()
-        if None in (agent_id, org_id):
+    def _request(
+        self,
+        request_func: _WrappedRequestFunc,
+        agent_ids: Optional[Tuple[Optional[str], Optional[str]]] = None,
+    ) -> httpx.Response:
+        agent_id, org_id = agent_ids if agent_ids is not None else self._get_agent_ids()
+        if agent_id is None or org_id is None:
             raise ValueError("Can't access KV storage. Missing agent id or org id")
 
         if None in (self.api_key, self.api_url):
