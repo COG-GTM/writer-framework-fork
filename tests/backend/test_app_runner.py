@@ -356,10 +356,13 @@ class TestAppProcessControlRequests:
     def test_stop_blueprint_run_is_control_request(self) -> None:
         assert AppProcess._is_control_request(self.event_request("stop_blueprint_run"))
 
+    def test_check_session_is_control_request(self) -> None:
+        assert AppProcess._is_control_request(AppProcessServerRequest(type="checkSession", payload=None))
+
     def test_other_requests_are_not_control_requests(self) -> None:
         assert not AppProcess._is_control_request(self.event_request("run_blueprint_by_id"))
         assert not AppProcess._is_control_request(self.event_request(None))
-        assert not AppProcess._is_control_request(AppProcessServerRequest(type="checkSession", payload=None))
+        assert not AppProcess._is_control_request(AppProcessServerRequest(type="stateEnquiry", payload=None))
 
     def test_control_requests_bypass_event_pool(self) -> None:
         process = AppProcess.__new__(AppProcess)

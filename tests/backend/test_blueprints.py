@@ -605,6 +605,52 @@ class TestNodeExecutor:
         finally:
             executor.shutdown()
 
+    def test_defers_outside_workers_and_runs_inline_inside(self):
+        executor = BlueprintNodeExecutor(1)
+        release = Event()
+        try:
+            busy = executor.submit(lambda: (
+                executor.submit_or_defer(threading.get_ident).result(),
+                threading.get_ident(),
+                release.wait(5),
+            ))
+            assert executor.submit_or_defer(threading.get_ident) is None
+            release.set()
+            inline_ident, worker_ident, _ = busy.result(timeout=5)
+            assert inline_ident == worker_ident
+        finally:
+            release.set()
+            executor.shutdown()
+
+    def test_saturated_pool_does_not_block_cancellation(self):
+        runner = NodeExecutorRunner(BlueprintNodeExecutor(1))
+        release = Event()
+        ran = Event()
+        graph = GraphBuilder(components=[
+            create_component("N1", fields={"callback": lambda env: ran.set()}),
+        ], tools=tools).build()
+        graph_runner = GraphRunner(graph=graph, execution_environment={}, runner=runner, title="Test Execution")
+        graph_runner.CANCELATION_CHECK_INTERVAL = 0.01
+
+        def cancel_until_stopped():
+            while not done.is_set():
+                runner.run_manager.cancel_run(graph_runner.run_id)
+                time.sleep(0.01)
+
+        done = Event()
+        try:
+            runner.node_executor.submit(release.wait, 10)
+            canceller = threading.Thread(target=cancel_until_stopped, daemon=True)
+            canceller.start()
+            try:
+                assert run_in_thread(graph_runner.run, timeout=5) is None
+            finally:
+                done.set()
+            assert not ran.is_set()
+        finally:
+            release.set()
+            runner.node_executor.shutdown()
+
     def test_nested_runs_complete_with_single_worker(self):
         runner = NodeExecutorRunner(BlueprintNodeExecutor(1))
 

@@ -682,7 +682,13 @@ class AppProcess(multiprocessing.Process):
 
     @staticmethod
     def _is_control_request(request: AppProcessServerRequest) -> bool:
-        """Requests that must not wait behind busy event handlers."""
+        """Requests that must not wait behind busy event handlers.
+
+        checkSession is included because the server awaits it before
+        dispatching every websocket message, including stop requests.
+        """
+        if request.type == "checkSession":
+            return True
         if request.type != "event":
             return False
         payload = request.payload

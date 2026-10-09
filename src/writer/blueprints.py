@@ -35,22 +35,50 @@ class BlueprintNodeExecutor:
 
     Kept separate from the app process's event pool so handlers waiting on
     node futures never compete with those nodes for a worker. A task is only
-    handed to the pool when a worker is guaranteed to be free; otherwise it
-    runs inline in the submitting thread. Queued node futures therefore can't
-    be starved by waiters, including nested runners (Run blueprint, For-each,
-    tool calling) that wait from inside a node.
+    handed to the pool when a worker is guaranteed to be free, so node futures
+    never sit in a queue behind waiters. When the pool is saturated, nested
+    runners (Run blueprint, For-each, tool calling) waiting from inside a node
+    run the task inline, while top-level runners defer it and keep polling for
+    cancellation.
     """
 
     def __init__(self, max_workers: int):
         self.max_workers = max_workers
+        self._worker_state = threading.local()
         self._executor = ThreadPoolExecutor(
-            max_workers=max_workers, thread_name_prefix="writer-blueprint-node"
+            max_workers=max_workers,
+            thread_name_prefix="writer-blueprint-node",
+            initializer=self._mark_worker,
         )
         self._slots = threading.BoundedSemaphore(max_workers)
 
+    def _mark_worker(self):
+        self._worker_state.is_worker = True
+
+    def is_worker_thread(self) -> bool:
+        return getattr(self._worker_state, "is_worker", False)
+
     def submit(self, fn, *args, **kwargs) -> Future:
-        if not self._slots.acquire(blocking=False):
+        future = self.try_submit(fn, *args, **kwargs)
+        if future is None:
             return self._run_inline(fn, *args, **kwargs)
+        return future
+
+    def submit_or_defer(self, fn, *args, **kwargs) -> Optional[Future]:
+        """Submit, or return None when saturated and the caller can retry.
+
+        Only node workers run tasks inline: they may be nested runners whose
+        children must make progress. Other callers stay free to poll for
+        cancellation and retry later.
+        """
+        future = self.try_submit(fn, *args, **kwargs)
+        if future is None and self.is_worker_thread():
+            return self._run_inline(fn, *args, **kwargs)
+        return future
+
+    def try_submit(self, fn, *args, **kwargs) -> Optional[Future]:
+        if not self._slots.acquire(blocking=False):
+            return None
         try:
             future = self._executor.submit(fn, *args, **kwargs)
         except BaseException:
@@ -584,17 +612,25 @@ class GraphNode:
                 return False
         return True
 
-    def run(self, execution_environment: Dict, runner, executor) -> Future:
+    def run(self, execution_environment: Dict, runner, executor) -> Optional[Future]:
+        """Start the node. Returns None if the executor deferred it."""
         if self.outcome is not None or self._is_skipped():
             self.status = "skipped"
             future: Future = Future()
             future.set_result(self)
             return future
 
-        self.tool = self.tool_class(self.component, runner, self._get_env(execution_environment))
-        self.tool.outcome = "in_progress"
+        tool = self.tool_class(self.component, runner, self._get_env(execution_environment))
+        tool.outcome = "in_progress"
         ctx = copy_context()
-        self.future = executor.submit(ctx.run, self.run_tool, self.tool)
+        if isinstance(executor, BlueprintNodeExecutor):
+            submitted = executor.submit_or_defer(ctx.run, self.run_tool, tool)
+            if submitted is None:
+                return None
+        else:
+            submitted = executor.submit(ctx.run, self.run_tool, tool)
+        self.tool = tool
+        self.future = submitted
         if not isinstance(self.future, Future):
             raise WriterConfigurationError(
                 f"Unable to run tool {self.tool.component.id} - the executor did not return a Future."
@@ -898,13 +934,23 @@ class GraphRunner:
     ) -> Optional[Any]:
         with use_journal_record_context(self.execution_environment, self.status_logger.title, self.graph) as journal_record:
             while self.queue or self.futures:
+                deferred: List[GraphNode] = []
                 while self.queue:
                     node: GraphNode = self.queue.pop(0)
                     if node.can_run() and node.outcome is None:
-                        self.futures.append(node.run(self.execution_environment, self.runner, executor))
+                        future = node.run(self.execution_environment, self.runner, executor)
+                        if future is None:
+                            deferred.append(node)
+                        else:
+                            self.futures.append(future)
+                self.queue.extend(deferred)
 
                 self.status_logger.log("Executing...")
-                done, _ = wait(self.futures, timeout=self.CANCELATION_CHECK_INTERVAL, return_when=FIRST_COMPLETED)
+                if self.futures:
+                    done, _ = wait(self.futures, timeout=self.CANCELATION_CHECK_INTERVAL, return_when=FIRST_COMPLETED)
+                else:
+                    done = set()
+                    abort_event.wait(self.CANCELATION_CHECK_INTERVAL)
                 if not done:
                     if abort_event.is_set():
                         self._cancel_all_jobs()
