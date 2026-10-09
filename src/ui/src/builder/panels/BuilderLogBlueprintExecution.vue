@@ -104,7 +104,7 @@
 					</div>
 					<div
 						v-if="item.message"
-						v-dompurify-html="marked.parse(item.message)"
+						v-dompurify-html="parseMarkdownWithoutRawHtml(item.message)"
 						class="message markdown"
 					></div>
 				</div>
@@ -114,7 +114,6 @@
 </template>
 
 <script setup lang="ts">
-import { marked } from "marked";
 import injectionKeys from "@/injectionKeys";
 import { BlueprintExecutionLog } from "../builderManager";
 import { computed, inject, nextTick, ref } from "vue";
@@ -125,6 +124,7 @@ import WdsIcon from "@/wds/WdsIcon.vue";
 import BuilderLogBlueprintExecutionTrace from "./BuilderLogBlueprintExecutionTrace.vue";
 import WdsModal from "@/wds/WdsModal.vue";
 import BuilderListItem from "../BuilderListItem.vue";
+import { parseMarkdownWithoutRawHtml } from "@/utils/markdown";
 
 const wf = inject(injectionKeys.core);
 const wfbm = inject(injectionKeys.builderManager);

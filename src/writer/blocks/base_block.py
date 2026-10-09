@@ -1,3 +1,4 @@
+import re
 from typing import TYPE_CHECKING, Any, Dict, Optional, Type
 
 import httpx
@@ -14,6 +15,13 @@ if TYPE_CHECKING:
 
 BlueprintBlock_T = Type["BlueprintBlock"]
 block_map: Dict[str, BlueprintBlock_T] = {}
+
+
+def format_as_code_block(text: str) -> str:
+    """Wrap text in a Markdown fenced code block so it is shown verbatim, never as HTML."""
+    longest_run = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    fence = "`" * max(3, longest_run + 1)
+    return f"{fence}\n{text.rstrip()}\n{fence}"
 
 
 class BlueprintBlock:
@@ -43,6 +51,7 @@ class BlueprintBlock:
     ):
         self.outcome: Optional[str] = None
         self.message: Optional[str] = None
+        self.message_is_traceback = False
         self.component = component
         self.runner = runner
         self.execution_time_in_seconds = -1.0

@@ -406,6 +406,13 @@ class GraphNode:
         self._message = value
 
     @property
+    def log_message(self) -> Optional[str]:
+        message = self.message
+        if message and not self._message and self.tool and self.tool.message_is_traceback:
+            return writer.blocks.base_block.format_as_code_block(message)
+        return message
+
+    @property
     def return_value(self) -> Optional[Any]:
         if self.tool:
             return self.tool.return_value
@@ -441,6 +448,7 @@ class GraphNode:
                 tool.message = str(e)
             else:
                 tool.message = repr(e)
+            tool.message_is_traceback = False
             if self._is_error_handled(tool.component, tool.outcome):
                 return self 
             else:
@@ -705,7 +713,7 @@ class StatusLogger:
                     exec_log.summary.append({
                         "componentId": node.id,
                         "outcome": node.outcome,
-                        "message": node.message,
+                        "message": node.log_message,
                         "result": None,
                         "returnValue": None,
                         "executionEnvironment": {},
@@ -717,7 +725,7 @@ class StatusLogger:
                     {
                         "componentId": node.id,
                         "outcome": node.outcome,
-                        "message": node.message,
+                        "message": node.log_message,
                         "executionTimeInSeconds": node.tool.execution_time_in_seconds,
                     }
                 )
@@ -727,7 +735,7 @@ class StatusLogger:
                     {
                         "componentId": node.id,
                         "outcome": node.outcome,
-                        "message": node.message,
+                        "message": node.log_message,
                         "executionTimeInSeconds": node.tool.execution_time_in_seconds,
                     }
                 )
@@ -737,7 +745,7 @@ class StatusLogger:
                 {
                     "componentId": node.id,
                     "outcome": node.outcome,
-                    "message": node.message,
+                    "message": node.log_message,
                     "result": self._summarize_data_for_log(node.result),
                     "returnValue": self._summarize_data_for_log(node.return_value),
                     "executionEnvironment": self._summarize_data_for_log(getattr(node.tool, "execution_environment_snapshot", None)),

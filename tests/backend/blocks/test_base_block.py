@@ -1,4 +1,4 @@
-from writer.blocks.base_block import BlueprintBlock
+from writer.blocks.base_block import BlueprintBlock, format_as_code_block
 from writer.core import WriterState
 
 
@@ -45,3 +45,13 @@ def test_set_state(session, runner):
     assert session.session_state["my_dict"]["animal"] == "cat"
     assert session.session_state["unchanged"] == "unchanged"
     assert block.outcome is None
+
+
+def test_format_as_code_block():
+    assert format_as_code_block("Traceback\nKeyError: '<b>'\n") == "```\nTraceback\nKeyError: '<b>'\n```"
+
+
+def test_format_as_code_block_cannot_be_closed_early():
+    text = "ValueError: '```\n<script>alert(1)</script>'"
+    formatted = format_as_code_block(text)
+    assert formatted == f"````\n{text}\n````"

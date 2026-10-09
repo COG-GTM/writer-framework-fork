@@ -118,6 +118,17 @@ class MockRunner:
 
 MockBlock.register("mock_block")
 
+
+class MockTracebackBlock(BlueprintBlock):
+    def run(self):
+        self.outcome = "error"
+        self.message = "Traceback\nValueError: '<img src=x onerror=alert(1)>'\n"
+        self.message_is_traceback = True
+        raise ValueError("<img src=x onerror=alert(1)>")
+
+
+tools["mock_traceback_block"] = MockTracebackBlock
+
 def create_component(id: str, outs=[], fields=None):
     return Component(
         id=id,
@@ -269,6 +280,28 @@ class TestErrorHandling:
             assert str(e) == "Blueprint execution was stopped due to an error - Exception: Error"
         else:
             assert False, "Expected an exception to be raised"
+
+    def test_traceback_message_is_code_block_only_in_log(self):
+        builder = GraphBuilder(components=[
+            Component(id="N1", type="mock_traceback_block", content={}),
+        ], tools=tools)
+        graph = builder.build()
+        runner = MockRunner()
+        with pytest.raises(Exception):
+            run_graph(graph, runner=runner)
+
+        node = graph.get_node("N1")
+        payload = "<img src=x onerror=alert(1)>"
+        assert node.message == repr(ValueError(payload))
+        assert node.log_message == node.message
+        exec_log = runner.session.session_state.add_log_entry.call_args.kwargs["blueprint_execution"]
+        assert exec_log.summary[0]["message"] == node.message
+
+        traceback_text = f"Traceback\nValueError: '{payload}'\n"
+        node.tool.message = traceback_text
+        node.tool.message_is_traceback = True
+        assert node.message == traceback_text
+        assert node.log_message == f"```\n{traceback_text.rstrip()}\n```"
 
     def test_node_requirements_not_met(self):
         builder = GraphBuilder(components=[

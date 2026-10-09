@@ -67,5 +67,6 @@ class IfElseBlock(BlueprintBlock):
                 self.outcome = "false"
         except BaseException:
             self.outcome = "error"
-            self.message = f"<pre>{traceback.format_exc()}</pre>"
+            self.message = traceback.format_exc()
+            self.message_is_traceback = True
             raise

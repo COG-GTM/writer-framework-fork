@@ -45,5 +45,8 @@
 	},
 	"devDependencies": {
 		"playwright": "^1.57.0"
+	},
+	"overrides": {
+		"dompurify": "^3.2.4"
 	}
 }

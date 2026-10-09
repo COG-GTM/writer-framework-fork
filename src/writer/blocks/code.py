@@ -97,6 +97,6 @@ class CodeBlock(BlueprintBlock):
             self.outcome = "success"
         except BaseException as e:
             self.outcome = "error"
-            # Wrap the message as a preformatted block to display as "raw" text in Markdown
-            self.message = f"<pre>{traceback.format_exc()}</pre>"
+            self.message = traceback.format_exc()
+            self.message_is_traceback = True
             raise e
