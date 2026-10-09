@@ -406,3 +406,80 @@ class TestServe:
             response_json = res.json()
             assert response_json["status"] == "error"
             assert "Project saver process is not running" in response_json["message"]
+
+
+class TestEditRouteOriginCheck:
+
+    LOCAL_URL = "http://127.0.0.1:4005"
+    ZIP_FILE = {"file": ("agent.zip", b"PK\x05\x06" + b"\x00" * 18, "application/zip")}
+
+    @pytest.fixture
+    def import_calls(self, monkeypatch):
+        calls = []
+
+        async def fake_import_zip(self, zip_path):
+            calls.append(zip_path)
+
+        monkeypatch.setattr(writer.serve.AppRunner, "import_zip", fake_import_zip)
+        return calls
+
+    def _client(self, mode="edit", base_url=LOCAL_URL, **kwargs):
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, mode, **kwargs)
+        return fastapi.testclient.TestClient(asgi_app, base_url=base_url)
+
+    def test_import_accepts_local_origin(self, import_calls):
+        res = self._client().post("/api/import", files=self.ZIP_FILE, headers={"Origin": self.LOCAL_URL})
+        assert res.status_code == 200
+        assert len(import_calls) == 1
+
+    @pytest.mark.parametrize("origin", ["https://attacker.example", "null", "http://127.0.0.1.attacker.example"])
+    def test_import_rejects_cross_site_origin(self, import_calls, origin):
+        res = self._client().post("/api/import", files=self.ZIP_FILE, headers={"Origin": origin})
+        assert res.status_code == 403
+        assert import_calls == []
+
+    def test_import_rejects_missing_origin(self, import_calls):
+        res = self._client().post("/api/import", files=self.ZIP_FILE)
+        assert res.status_code == 403
+        assert import_calls == []
+
+    def test_import_rejects_rebound_host(self, import_calls):
+        client = self._client(base_url="http://rebind.attacker.example:4005")
+        res = client.post("/api/import", files=self.ZIP_FILE, headers={"Origin": self.LOCAL_URL})
+        assert res.status_code == 403
+        assert import_calls == []
+
+    def test_import_allows_any_origin_with_remote_edit(self, import_calls):
+        client = self._client(base_url="http://builder.example", enable_remote_edit=True)
+        res = client.post("/api/import", files=self.ZIP_FILE, headers={"Origin": "https://builder.example"})
+        assert res.status_code == 200
+        assert len(import_calls) == 1
+
+    def test_import_rejected_in_run_mode(self, import_calls):
+        res = self._client(mode="run").post("/api/import", files=self.ZIP_FILE, headers={"Origin": self.LOCAL_URL})
+        assert res.status_code == 403
+        assert import_calls == []
+
+    @pytest.mark.parametrize("headers", [{}, {"Sec-Fetch-Site": "same-origin"}, {"Origin": "http://localhost:4005"}])
+    def test_export_accepts_local_request(self, headers):
+        res = self._client().get("/api/export", headers=headers)
+        assert res.status_code == 200
+        assert res.headers["content-type"] == "application/x-zip-compressed"
+
+    @pytest.mark.parametrize("headers", [{"Origin": "https://attacker.example"}, {"Sec-Fetch-Site": "cross-site"}])
+    def test_export_rejects_cross_site_request(self, headers):
+        res = self._client().get("/api/export", headers=headers)
+        assert res.status_code == 403
+
+    def test_export_rejects_rebound_host(self):
+        res = self._client(base_url="http://rebind.attacker.example:4005").get("/api/export")
+        assert res.status_code == 403
+
+    @pytest.mark.parametrize("path,body", [
+        ("/api/data/retrieve", {"skip_keys": []}),
+        ("/api/data/delete", {"keys": ["k"]}),
+        ("/api/autogen", {"description": "x"}),
+    ])
+    def test_other_edit_routes_reject_cross_site_origin(self, path, body):
+        res = self._client().post(path, json=body, headers={"Origin": "https://attacker.example"})
+        assert res.status_code == 403
