@@ -1,6 +1,12 @@
+import re
+
 from writer.abstract import register_abstract_template
 from writer.blocks.base_block import WriterBlock
-from writer.ss_types import AbstractTemplate
+from writer.ss_types import AbstractTemplate, WriterConfigurationError
+
+UUID_PATTERN = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
 
 
 class WriterParsePDFByFileID(WriterBlock):
@@ -55,7 +61,11 @@ class WriterParsePDFByFileID(WriterBlock):
         try:
             import writer.ai
 
-            file_uuid = self._get_field("file")
+            file_uuid = self._get_field("file", required=True)
+            if not isinstance(file_uuid, str) or not UUID_PATTERN.fullmatch(file_uuid):
+                raise WriterConfigurationError(
+                    "The field `file` must be the UUID of a file object in Files API."
+                )
             markdown_input = self._get_field("markdown", False, "yes") == "yes"
 
             client = writer.ai.WriterAIManager.acquire_client()
