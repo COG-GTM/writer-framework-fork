@@ -1,9 +1,9 @@
 <template>
 	<div class="CoreLink">
 		<a
-			:href="fields.url.value"
+			:href="safeHref"
 			:target="fields.target.value"
-			:rel="fields.rel.value"
+			:rel="rel"
 		>
 			{{ displayText }}
 		</a>
@@ -67,7 +67,16 @@ export default {
 
 <script setup lang="ts">
 import { inject, computed } from "vue";
+import { sanitizeUrl } from "@/utils/url";
 const fields = inject(injectionKeys.evaluatedFields);
+
+const safeHref = computed(() => sanitizeUrl(fields.url.value));
+
+const rel = computed(() => {
+	if (fields.rel.value) return fields.rel.value;
+	if (fields.target.value === "_blank") return "noopener noreferrer";
+	return undefined;
+});
 
 const displayText = computed(() => {
 	return fields.text.value || fields.url.value;
