@@ -3,7 +3,9 @@ import ipaddress
 import socket
 import threading
 
+import httpx
 import pytest
+
 from writer.blocks import egress
 from writer.blocks.httprequest import HTTPRequest
 
@@ -180,6 +182,23 @@ def test_redirects_are_checked(session, runner, monkeypatch, local_server):
     with block.acquire_httpx_client() as client:
         with pytest.raises(egress.EgressPolicyError):
             client.get(f"http://127.0.0.1:{local_server}/redirect", follow_redirects=True)
+
+
+def test_custom_client_redirects_are_checked(session, runner):
+    def handler(request):
+        if request.url.host == "93.184.216.34":
+            return httpx.Response(302, headers={"Location": "http://169.254.169.254/latest/"})
+        return httpx.Response(200, text="metadata")
+
+    custom_client = httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=True)
+
+    class CustomClientRequest(HTTPRequest, custom_httpx_client=custom_client):
+        pass
+
+    component = session.add_fake_component({"url": "http://93.184.216.34/", "method": "GET"})
+    block = CustomClientRequest(component, runner, {})
+    with pytest.raises(egress.EgressPolicyError):
+        block.run()
 
 
 def test_metadata_endpoint_blocked_by_block(session, runner):

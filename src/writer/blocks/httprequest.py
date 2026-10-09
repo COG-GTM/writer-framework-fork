@@ -96,11 +96,13 @@ class HTTPRequest(BlueprintBlock):
 
     def acquire_httpx_client(self) -> httpx.Client:
         if self._custom_httpx_client:
-            return self._custom_httpx_client
-        client = self.create_httpx_client(transport=egress.GuardedHTTPTransport())
+            client = self._custom_httpx_client
+        else:
+            client = self.create_httpx_client(transport=egress.GuardedHTTPTransport())
         hooks = client.event_hooks
-        hooks["request"] = [egress.request_hook] + hooks.get("request", [])
-        client.event_hooks = hooks
+        if egress.request_hook not in hooks.get("request", []):
+            hooks["request"] = [egress.request_hook] + hooks.get("request", [])
+            client.event_hooks = hooks
         return client
 
     def run(self):
