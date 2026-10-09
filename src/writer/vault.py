@@ -7,7 +7,7 @@ configuration and error handling.
 """
 
 import logging
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import httpx
 
@@ -20,18 +20,21 @@ class WriterVault:
     """Manages retrieval and caching of secrets from the Writer vault service."""
 
     def __init__(self) -> None:
-        """Initialize vault with empty cache."""
-        self.secrets: Optional[Dict] = None
+        """Initialize vault with an empty per-tenant cache."""
+        self._secrets: Dict[Tuple[Optional[str], Optional[str]], Dict] = {}
 
     def get_secrets(self) -> Dict:
-        """Get cached secrets, fetching from vault if not already loaded."""
-        if self.secrets is None:
-            self.secrets = self._fetch()
-        return self.secrets
+        """Get cached secrets for the current agent/org, fetching from vault if not already loaded."""
+        tenant = writer_kv_storage.get_agent_ids()
+        secrets = self._secrets.get(tenant)
+        if secrets is None:
+            secrets = self._fetch()
+            self._secrets[tenant] = secrets
+        return secrets
 
     def refresh(self):
-        """Force refresh of secrets from the vault service."""
-        self.secrets = self._fetch()
+        """Drop cached secrets for every agent/org so the next access refetches them."""
+        self._secrets = {}
 
     def _fetch(self) -> Dict:
         try:
