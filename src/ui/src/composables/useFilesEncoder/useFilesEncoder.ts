@@ -40,6 +40,41 @@ function isEncodedFile(input: unknown): input is EncodedFile {
 	);
 }
 
+// Room for the JSON envelope, file names and data URL prefixes.
+const WEBSOCKET_ENVELOPE_RESERVE_BYTES = 64 * 1024;
+
+/**
+ * Largest total size of raw files that still fits in one websocket message once
+ * base64-encoded (4/3 overhead), capped at `fallback`.
+ */
+export function getMaxEncodedFilesSize(
+	maxWebsocketMessageSize: number | null | undefined,
+	fallback: number,
+): number {
+	if (!maxWebsocketMessageSize) return fallback;
+	const available = Math.max(
+		maxWebsocketMessageSize - WEBSOCKET_ENVELOPE_RESERVE_BYTES,
+		0,
+	);
+	return Math.min(fallback, Math.floor((available * 3) / 4));
+}
+
+// Room for the event envelope around a payload (type, tracking id, instance path).
+const WEBSOCKET_EVENT_RESERVE_BYTES = 16 * 1024;
+
+/**
+ * Whether `payload`, once wrapped in an event message, would exceed the
+ * server's websocket limit.
+ */
+export function exceedsWebsocketLimit(
+	payload: unknown,
+	maxWebsocketMessageSize: number | null | undefined,
+): boolean {
+	if (!maxWebsocketMessageSize) return false;
+	const size = new Blob([JSON.stringify(payload)]).size;
+	return size + WEBSOCKET_EVENT_RESERVE_BYTES > maxWebsocketMessageSize;
+}
+
 export type UseFilesEncoderParams = {
 	multiple: MaybeRef<boolean>;
 };

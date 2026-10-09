@@ -1,3 +1,4 @@
+import asyncio
 import json
 import mimetypes
 from typing import Any
@@ -84,6 +85,132 @@ class TestServe:
                 })
                 with pytest.raises(fastapi.WebSocketDisconnect):
                     websocket.receive_bytes()
+
+    def _init_stream(self, client) -> Any:
+        res = client.post("/api/init", json={"proposedSessionId": None})
+        assert res.status_code == 200
+        return res.json()
+
+    def test_max_websocket_message_size_depends_on_mode(self) -> None:
+        assert writer.serve.get_max_websocket_message_size("edit") == writer.serve.MAX_WEBSOCKET_MESSAGE_SIZE
+        assert writer.serve.get_max_websocket_message_size("run") == writer.serve.MAX_RUN_WEBSOCKET_MESSAGE_SIZE
+        assert writer.serve.MAX_RUN_WEBSOCKET_MESSAGE_SIZE < writer.serve.MAX_WEBSOCKET_MESSAGE_SIZE
+
+    def test_init_exposes_max_websocket_message_size(self) -> None:
+        asgi_app: fastapi.FastAPI = writer.serve.get_asgi_app(test_app_dir, "run")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            init = self._init_stream(client)
+            assert init["maxWebsocketMessageSize"] == writer.serve.MAX_RUN_WEBSOCKET_MESSAGE_SIZE
+
+    def test_run_mode_closes_websocket_on_oversized_message(self, monkeypatch) -> None:
+        monkeypatch.setattr(writer.serve, "MAX_RUN_WEBSOCKET_MESSAGE_SIZE", 1024)
+        asgi_app: fastapi.FastAPI = writer.serve.get_asgi_app(test_app_dir, "run")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            session_id = self._init_stream(client)["sessionId"]
+            with client.websocket_connect("/api/stream") as websocket:
+                websocket.send_json({
+                    "type": "streamInit",
+                    "trackingId": 0,
+                    "payload": {"sessionId": session_id}
+                })
+                websocket.send_json({
+                    "type": "event",
+                    "trackingId": 1,
+                    "payload": {
+                        "type": "wf-number-change",
+                        "instancePath": [{"componentId": "root", "instanceNumber": 0}],
+                        "payload": "x" * 2048
+                    }
+                })
+                with pytest.raises(fastapi.WebSocketDisconnect) as exc_info:
+                    websocket.receive_bytes()
+                assert exc_info.value.code == 1009
+
+    def test_run_mode_closes_websocket_on_oversized_stream_init(self, monkeypatch) -> None:
+        monkeypatch.setattr(writer.serve, "MAX_RUN_WEBSOCKET_MESSAGE_SIZE", 1024)
+        asgi_app: fastapi.FastAPI = writer.serve.get_asgi_app(test_app_dir, "run")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            with client.websocket_connect("/api/stream") as websocket:
+                websocket.send_json({
+                    "type": "streamInit",
+                    "trackingId": 0,
+                    "payload": {"sessionId": "x" * 2048}
+                })
+                with pytest.raises(fastapi.WebSocketDisconnect) as exc_info:
+                    websocket.receive_bytes()
+                assert exc_info.value.code == 1009
+
+    def test_inflight_cap_still_processes_every_message(self, monkeypatch) -> None:
+        monkeypatch.setattr(writer.serve, "MAX_WEBSOCKET_INFLIGHT_TASKS", 1)
+        asgi_app: fastapi.FastAPI = writer.serve.get_asgi_app(test_app_dir, "run")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            session_id = self._init_stream(client)["sessionId"]
+            with client.websocket_connect("/api/stream") as websocket:
+                websocket.send_json({
+                    "type": "streamInit",
+                    "trackingId": 0,
+                    "payload": {"sessionId": session_id}
+                })
+                for tracking_id in range(1, 4):
+                    websocket.send_json({
+                        "type": "keepAlive",
+                        "trackingId": tracking_id,
+                        "payload": {}
+                    })
+                received = set()
+                for _ in range(3):
+                    message = json.loads(websocket.receive_bytes().decode())
+                    assert message["messageType"] == "keepAliveResponse"
+                    received.add(message["trackingId"])
+                assert received == {1, 2, 3}
+                websocket.close(1000)
+
+    def test_rate_limit_applies_before_stream_init(self, monkeypatch) -> None:
+        calls = []
+        original_acquire = writer.serve._TokenBucket.acquire
+
+        async def counting_acquire(self) -> None:
+            calls.append(1)
+            await original_acquire(self)
+
+        monkeypatch.setattr(writer.serve._TokenBucket, "acquire", counting_acquire)
+        asgi_app: fastapi.FastAPI = writer.serve.get_asgi_app(test_app_dir, "run")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            session_id = self._init_stream(client)["sessionId"]
+            with client.websocket_connect("/api/stream") as websocket:
+                for tracking_id in range(3):
+                    websocket.send_json({
+                        "type": "keepAlive",
+                        "trackingId": tracking_id,
+                        "payload": {}
+                    })
+                websocket.send_json({
+                    "type": "streamInit",
+                    "trackingId": 3,
+                    "payload": {"sessionId": session_id}
+                })
+                websocket.send_json({
+                    "type": "stateEnquiry",
+                    "trackingId": 4,
+                    "payload": {}
+                })
+                message = json.loads(websocket.receive_bytes().decode())
+                assert message["trackingId"] == 4
+                websocket.close(1000)
+        assert len(calls) >= 5
+
+    def test_token_bucket_throttles_after_burst(self) -> None:
+        async def run() -> float:
+            bucket = writer.serve._TokenBucket(rate=20, burst=2)
+            loop = asyncio.get_running_loop()
+            start = loop.time()
+            for _ in range(4):
+                await bucket.acquire()
+            return loop.time() - start
+
+        elapsed = asyncio.run(run())
+        # 2 burst tokens are free; the next 2 need ~0.05s each at 20/s.
+        assert elapsed >= 0.08
 
     def test_session_verifier_header(self) -> None:
         asgi_app: fastapi.FastAPI = writer.serve.get_asgi_app(

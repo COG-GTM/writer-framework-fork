@@ -53,7 +53,7 @@ See the stubs for more details.
 					<WdsIcon name="triangle-alert" />
 					<span>
 						Size limit of
-						{{ prettyBytes(MAX_FILE_SIZE) }} exceeded.
+						{{ prettyBytes(maxFileSize) }} exceeded.
 					</span>
 				</div>
 				<WdsControl
@@ -328,7 +328,11 @@ export default {
 };
 </script>
 <script setup lang="ts">
-import { useFilesEncoder } from "@/composables/useFilesEncoder/useFilesEncoder";
+import {
+	exceedsWebsocketLimit,
+	getMaxEncodedFilesSize,
+	useFilesEncoder,
+} from "@/composables/useFilesEncoder/useFilesEncoder";
 import { useLogger } from "@/composables/useLogger";
 import injectionKeys from "@/injectionKeys";
 import { optimizeImage } from "@/utils/img";
@@ -381,10 +385,13 @@ const { files, calcTotalSize, addFiles, removeFile, clearFiles, encodeFiles } =
 		multiple: isMultipleFilesAllowed,
 	});
 
-const MAX_FILE_SIZE = 200 * 1024 * 1024;
+const wf = inject(injectionKeys.core);
+const maxFileSize = computed(() =>
+	getMaxEncodedFilesSize(wf.maxWebsocketMessageSize?.value, 200 * 1024 * 1024),
+);
 
 const isUploadSizeExceeded = computed(
-	() => calcTotalSize(files.value) > MAX_FILE_SIZE,
+	() => calcTotalSize(files.value) > maxFileSize.value,
 );
 
 const displayExtraLoader = computed(() => {
@@ -402,8 +409,6 @@ function handleMessageSent(e?: KeyboardEvent | MouseEvent) {
 	}
 	const trimmedMessage = outgoingMessage.value?.trim();
 	if (!trimmedMessage && pastedImages.value.length === 0) return;
-
-	messageIndexLoading.value = messages.value.length + 1;
 
 	// Create payload based on whether we have images or just text
 	type MessagePayload = {
@@ -446,6 +451,13 @@ function handleMessageSent(e?: KeyboardEvent | MouseEvent) {
 			content: trimmedMessage!,
 		};
 	}
+
+	if (exceedsWebsocketLimit(payload, wf.maxWebsocketMessageSize?.value)) {
+		showError("Message is too big to send. Try fewer or smaller images.");
+		return;
+	}
+
+	messageIndexLoading.value = messages.value.length + 1;
 
 	const event = new CustomEvent("wf-chatbot-message", {
 		detail: {
@@ -747,6 +759,12 @@ async function handleUploadFiles() {
 	const { encodedFiles } = await encodeFiles();
 
 	if (encodedFiles.length === 0) {
+		isUploadingFiles.value = false;
+		return;
+	}
+
+	if (exceedsWebsocketLimit(encodedFiles, wf.maxWebsocketMessageSize?.value)) {
+		showError("Files are too big to upload together. Try fewer or smaller files.");
 		isUploadingFiles.value = false;
 		return;
 	}

@@ -108,6 +108,7 @@ class InitResponseBody(BaseModel):
     featureFlags: List[str]
     abstractTemplates: Dict[str, AbstractTemplate]
     writerApplication: Optional[WriterApplicationInformation]
+    maxWebsocketMessageSize: Optional[int] = None
 
 
 class InitResponseBodyRun(InitResponseBody):

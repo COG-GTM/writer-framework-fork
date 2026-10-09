@@ -76,6 +76,7 @@ export function generateCore() {
 	>();
 	const logger = useLogger();
 	const featureFlags = shallowRef<string[]>([]);
+	const maxWebsocketMessageSize = ref<number | null>(null);
 	const runCode: Ref<string> = ref(null);
 	const sourceFiles = shallowRef<SourceFiles>({
 		type: "directory",
@@ -237,6 +238,7 @@ export function generateCore() {
 		sessionTimestamp.value = new Date().getTime();
 		featureFlags.value = initData.featureFlags;
 		setActiveFeatureFlags(featureFlags.value);
+		maxWebsocketMessageSize.value = initData.maxWebsocketMessageSize ?? null;
 		writerApplication.value = initData.writerApplication;
 		loadAbstractTemplates(initData.abstractTemplates);
 
@@ -868,6 +870,19 @@ export function generateCore() {
 		setTimeout(() => checkIfStateEnquiryRequired(0), INITIAL_FOLLOWUP_MS);
 	}
 
+	/**
+	 * The server closes the connection on oversized frames, so reject them
+	 * client-side instead.
+	 */
+	function isOverWebsocketLimit(serializedData: string): boolean {
+		const limit = maxWebsocketMessageSize.value;
+		if (!limit) return false;
+		// UTF-8 uses between 1 and 3 bytes per UTF-16 code unit.
+		if (serializedData.length > limit) return true;
+		if (serializedData.length * 3 <= limit) return false;
+		return new Blob([serializedData]).size > limit;
+	}
+
 	async function sendFrontendMessage(
 		type: string,
 		payload: object | (() => Promise<object>),
@@ -907,8 +922,14 @@ export function generateCore() {
 			if (webSocket.readyState !== WebSocket.OPEN) {
 				throw "Connection lost.";
 			}
+			const serializedData = JSON.stringify(wsData, bigIntReplacer);
+			if (isOverWebsocketLimit(serializedData)) {
+				throw new Error(
+					`Message of type "${type}" exceeds the server limit of ${maxWebsocketMessageSize.value} bytes.`,
+				);
+			}
 			try {
-				webSocket.send(JSON.stringify(wsData, bigIntReplacer));
+				webSocket.send(serializedData);
 			} catch (error) {
 				incrementMetric(METRIC_NAMES.WEBSOCKET_MESSAGE_SEND_ERROR, {
 					tags: { type, mode: mode.value || "unknown" },
@@ -941,6 +962,7 @@ export function generateCore() {
 			incrementMetric(METRIC_NAMES.FRONTEND_MESSAGE_ERROR, {
 				tags: { type, mode: mode.value || "unknown" },
 			});
+			frontendMessageMap.value.delete(trackingId);
 			callback?.({ ok: false });
 		}
 	}
@@ -1166,6 +1188,7 @@ export function generateCore() {
 		userStateInitial: readonly(userStateInitial),
 		isChildOf,
 		featureFlags: readonly(featureFlags),
+		maxWebsocketMessageSize: readonly(maxWebsocketMessageSize),
 		getWebSocket,
 		stopSync,
 		// writer cloud variables
