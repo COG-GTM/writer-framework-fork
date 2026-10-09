@@ -1,11 +1,26 @@
 import logging
 import os
+import re
 from functools import partial
 from typing import Any, Dict, List, Literal, Optional, Protocol
+from urllib.parse import quote
 
 import httpx
 
 logger = logging.getLogger("kv_storage")
+
+ALLOWED_KEY_CHARS = re.compile(r"^[A-Za-z0-9\-_]+$")
+KEY_TYPES = ("data", "secret")
+
+
+class InvalidKeyError(ValueError):
+    pass
+
+
+def validate_key(key: Any) -> str:
+    if not isinstance(key, str) or not ALLOWED_KEY_CHARS.fullmatch(key):
+        raise InvalidKeyError("Key can only contain alphanumeric characters, underscores and hyphens")
+    return key
 
 
 class _WrappedRequestFunc(Protocol):
@@ -40,13 +55,19 @@ class KeyValueStorage:
         org_id = os.getenv("WRITER_ORG_ID")
         return (agent_id, org_id)
 
+    def _key_url(self, key: str, type_: Literal["data", "secret"] = "data") -> str:
+        if type_ not in KEY_TYPES:
+            raise ValueError(f"Unknown KV storage type: {type_}")
+        return f"{self.api_url}/agent_{type_}/{quote(validate_key(key), safe='')}"
+
     def get(self, key: str, type_: Literal["data", "secret"]) -> Dict[str, Any]:
-        return self._request(partial(self._client.get, url=f"{self.api_url}/agent_{type_}/{key}")).json()
+        return self._request(partial(self._client.get, url=self._key_url(key, type_))).json()
 
     def get_data_keys(self) -> List[str]:
         return self._request(partial(self._client.get, url=f"{self.api_url}/agent_data")).json()["keys"]
     
     def save(self, key: str, data: Any) -> Dict[str, Any]:
+        validate_key(key)
         try:
             return self._create(key, data).json()
         except httpx.HTTPStatusError as e:
@@ -58,10 +79,10 @@ class KeyValueStorage:
         return self._request(partial(self._client.post, url=f"{self.api_url}/agent_data", json={"key": key, "data": data}))
 
     def _update(self, key: str, data: Any) -> httpx.Response:
-        return self._request(partial(self._client.put, url=f"{self.api_url}/agent_data/{key}", json={"data": data}))
+        return self._request(partial(self._client.put, url=self._key_url(key), json={"data": data}))
 
     def delete(self, key: str) -> Dict[str, str]:
-        self._request(partial(self._client.delete, url=f"{self.api_url}/agent_data/{key}"))
+        self._request(partial(self._client.delete, url=self._key_url(key)))
         return {"key": key}
 
     def _request(self, request_func: _WrappedRequestFunc) -> httpx.Response:

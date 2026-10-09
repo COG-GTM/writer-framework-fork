@@ -303,14 +303,29 @@ def get_asgi_app(
             agent_token_header
             )
 
+    def _authorize_journal_data_request(request: Request) -> None:
+        if serve_mode != "edit":
+            raise HTTPException(status_code=403, detail="Invalid mode.")
+        if not _check_origin_header(request.headers.get("origin")):
+            raise HTTPException(status_code=403, detail="Invalid origin.")
+
+    def _is_journal_data_key(key: str) -> bool:
+        from writer.journal import INIT_LOGS_KEY_PREFIX, JOURNAL_KEY_PREFIX
+        from writer.keyvalue_storage import ALLOWED_KEY_CHARS
+
+        return bool(ALLOWED_KEY_CHARS.fullmatch(key)) and key.startswith((JOURNAL_KEY_PREFIX, INIT_LOGS_KEY_PREFIX))
+
     @app.post("/api/data/retrieve")
-    async def retrieve_data(requestBody: RetrieveDataRequestBody) -> RetrieveDataResponseBody:
+    async def retrieve_data(requestBody: RetrieveDataRequestBody, request: Request) -> RetrieveDataResponseBody:
         from writer.keyvalue_storage import writer_kv_storage
 
+        _authorize_journal_data_request(request)
         all_keys = writer_kv_storage.get_data_keys()
 
         keys_to_fetch = []
         for key in all_keys:
+            if not _is_journal_data_key(key):
+                continue
             if key in requestBody.skip_keys:
                 continue
             if requestBody.key_contains and requestBody.key_contains not in key:
@@ -325,8 +340,13 @@ def get_asgi_app(
         return RetrieveDataResponseBody(result={k: v["data"] for k, v in kv_pairs})
 
     @app.post("/api/data/delete")
-    async def delete_data(requestBody: DeleteDataRequestBody) -> None:
+    async def delete_data(requestBody: DeleteDataRequestBody, request: Request) -> None:
         from writer.keyvalue_storage import writer_kv_storage
+
+        _authorize_journal_data_request(request)
+        invalid_keys = [key for key in requestBody.keys if not _is_journal_data_key(key)]
+        if invalid_keys:
+            raise HTTPException(status_code=400, detail="Only journal and init log keys can be deleted.")
 
         async def delete_key(key: str):
             return key, await asyncio.to_thread(writer_kv_storage.delete, key)
