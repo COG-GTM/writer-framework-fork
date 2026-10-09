@@ -303,9 +303,17 @@ def get_asgi_app(
             agent_token_header
             )
 
+    def _check_builder_data_access(request: Request) -> None:
+        if serve_mode != "edit":
+            raise HTTPException(status_code=403, detail="Invalid mode.")
+        if not _check_origin_header(request.headers.get("origin")):
+            raise HTTPException(status_code=403, detail="Incorrect origin. Only local origins are allowed.")
+
     @app.post("/api/data/retrieve")
-    async def retrieve_data(requestBody: RetrieveDataRequestBody) -> RetrieveDataResponseBody:
-        from writer.keyvalue_storage import writer_kv_storage
+    async def retrieve_data(requestBody: RetrieveDataRequestBody, request: Request) -> RetrieveDataResponseBody:
+        from writer.keyvalue_storage import InvalidKeyError, validate_key, writer_kv_storage
+
+        _check_builder_data_access(request)
 
         all_keys = writer_kv_storage.get_data_keys()
 
@@ -315,8 +323,13 @@ def get_asgi_app(
                 continue
             if requestBody.key_contains and requestBody.key_contains not in key:
                 continue
+            try:
+                validate_key(key)
+            except InvalidKeyError:
+                logging.warning("Skipping KV storage key with unsupported characters: %r", key)
+                continue
             keys_to_fetch.append(key)
-        
+
         async def fetch_value(key: str):
             return key, await asyncio.to_thread(writer_kv_storage.get, key, "data")
 
@@ -325,8 +338,16 @@ def get_asgi_app(
         return RetrieveDataResponseBody(result={k: v["data"] for k, v in kv_pairs})
 
     @app.post("/api/data/delete")
-    async def delete_data(requestBody: DeleteDataRequestBody) -> None:
-        from writer.keyvalue_storage import writer_kv_storage
+    async def delete_data(requestBody: DeleteDataRequestBody, request: Request) -> None:
+        from writer.keyvalue_storage import InvalidKeyError, validate_key, writer_kv_storage
+
+        _check_builder_data_access(request)
+
+        try:
+            for key in requestBody.keys:
+                validate_key(key)
+        except InvalidKeyError as e:
+            raise HTTPException(status_code=400, detail="Invalid key.") from e
 
         async def delete_key(key: str):
             return key, await asyncio.to_thread(writer_kv_storage.delete, key)
