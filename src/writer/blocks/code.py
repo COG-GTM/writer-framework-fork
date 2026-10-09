@@ -68,7 +68,7 @@ class CodeBlock(BlueprintBlock):
 
     def run(self):
         try:
-            code = self._get_field("code")
+            code, template_bindings = self._get_code_field("code")
             self.result = None
 
             writeruserapp = sys.modules.get("writeruserapp")
@@ -80,6 +80,7 @@ class CodeBlock(BlueprintBlock):
                     "set_output": self.set_output,
                     "logger": exec_logger,
                 }
+                | template_bindings
             )
 
             with (

@@ -87,6 +87,15 @@ class BlueprintBlock:
 
         return value
 
+    def _get_code_field(self, field_key: str, default_field_value="", mode="exec"):
+        """
+        Returns the Python source of a code-bearing field and the template bindings that
+        must be added to its execution globals. Template values are never spliced into the source.
+        """
+        return self.evaluator.evaluate_code_field(
+            self.instance_path, field_key, default_field_value, self.execution_environment, mode
+        )
+
     def _set_state(self, expr: str, value: Any):
         self.evaluator.set_state(
             expr, self.instance_path, value, base_context=self.execution_environment

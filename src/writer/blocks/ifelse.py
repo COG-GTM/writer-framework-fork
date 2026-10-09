@@ -1,9 +1,28 @@
+import builtins
 import sys
 import traceback
 
 from writer.abstract import register_abstract_template
 from writer.blocks.base_block import BlueprintBlock
 from writer.ss_types import AbstractTemplate
+
+EXPRESSION_BUILTINS = {
+    name: value
+    for name, value in vars(builtins).items()
+    if name
+    not in {
+        "__import__",
+        "breakpoint",
+        "compile",
+        "eval",
+        "exec",
+        "exit",
+        "help",
+        "input",
+        "open",
+        "quit",
+    }
+}
 
 
 class IfElseBlock(BlueprintBlock):
@@ -22,7 +41,7 @@ class IfElseBlock(BlueprintBlock):
                         "expression": {
                             "name": "Expression",
                             "type": "Eval",
-                            "desc": "The expression to be evaluated. Must be a single expression (no statements).",
+                            "desc": "The expression to be evaluated. Must be a single expression (no statements). Reference values as variables, e.g. state[\"counter\"], payload or result.",
                             "init": 'state["counter"] > 10',
                         },
                     },
@@ -48,14 +67,15 @@ class IfElseBlock(BlueprintBlock):
         )
 
     def run(self):
-        expression = self._get_field("expression")
-
         try:
+            expression, template_bindings = self._get_code_field("expression", mode="eval")
             writeruserapp = sys.modules.get("writeruserapp")
             block_globals = {
                 **self.execution_environment,
                 **(writeruserapp.__dict__ if writeruserapp else {}),
                 "state": self.runner.session.session_state,
+                **template_bindings,
+                "__builtins__": EXPRESSION_BUILTINS,
             }
             # Evaluate the expression and set the result
             compiled_expr = compile(expression, "<expression>", mode="eval")
