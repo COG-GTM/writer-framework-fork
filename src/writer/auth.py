@@ -2,11 +2,14 @@ import asyncio
 import dataclasses
 import logging
 import os.path
+import secrets
 import time
 from abc import ABCMeta, abstractmethod
 from typing import Callable, Dict, Optional
 from urllib.parse import urlparse
 
+from authlib.common.errors import AuthlibBaseError  # type: ignore
+from authlib.common.security import generate_token  # type: ignore
 from authlib.integrations.requests_client.oauth2_session import OAuth2Session  # type: ignore
 from fastapi import Request, Response, status
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -177,6 +180,9 @@ class Oidc(Auth):
     callback_authorize: str = "authorize"
     url_userinfo: Optional[str] = None
     app_static_public: bool = False
+    login_state_max_age_seconds: int = 600
+
+    LOGIN_COOKIE_PREFIX = "oidc_login_"
 
     authlib: OAuth2Session = None
     callback_func: Optional[Callable[[Request, str, dict], None]] = None # Callback to validate user authentication
@@ -211,17 +217,37 @@ class Oidc(Auth):
         logger.debug(f"[auth] oidc - path: {host_url_path}")
         logger.debug(f"[auth] oidc - auth authorized routes: {auth_authorized_routes}")
         logger.debug(f"[auth] oidc - auth authorized prefix paths: {auth_authorized_prefix_paths}")
-        self.authlib = OAuth2Session(
-            client_id=self.client_id,
-            client_secret=self.client_secret,
-            scope=self.scope.split(" "),
-            redirect_uri=redirect_url,
-            authorization_endpoint=self.url_authorize,
-            token_endpoint=self.url_oauthtoken,
-        )
+        self.authlib = self._oauth_session(redirect_url)
 
         self.unauthorized_action = unauthorized_action
         self.callback_func = callback
+        secure_cookies = urlparse(self.host_url).scheme == "https"
+
+        def set_login_cookie(response: Response, state: str, code_verifier: str):
+            response.set_cookie(
+                key=self.LOGIN_COOKIE_PREFIX + state,
+                value=code_verifier,
+                max_age=self.login_state_max_age_seconds,
+                path=callback_authorize_path,
+                httponly=True,
+                secure=secure_cookies,
+                samesite="lax",
+            )
+
+        def clear_login_cookie(response: Response, state: Optional[str]):
+            if state:
+                response.delete_cookie(key=self.LOGIN_COOKIE_PREFIX + state, path=callback_authorize_path,
+                                       httponly=True, secure=secure_cookies, samesite="lax")
+
+        def unauthorized_response(request: Request, exc: Unauthorized) -> Response:
+            if self.unauthorized_action is not None:
+                return self.unauthorized_action(request, exc)
+            templates = Jinja2Templates(directory=os.path.join(os.path.dirname(__file__), "templates"))
+            return templates.TemplateResponse(request=request, name="auth_unauthorized.html", status_code=exc.status_code, context={
+                "status_code": exc.status_code,
+                "message": exc.message,
+                "more_info": exc.more_info
+            })
 
         @asgi_app.middleware("http")
         async def oidc_middleware(request: Request, call_next):
@@ -232,14 +258,31 @@ class Oidc(Auth):
                 response: Response = await call_next(request)
                 return response
             else:
-                url = self.authlib.create_authorization_url(self.url_authorize)
-                response = RedirectResponse(url=url[0])
+                state = secrets.token_urlsafe(32)
+                code_verifier = generate_token(64)
+                url, _ = self._oauth_session(redirect_url).create_authorization_url(
+                    self.url_authorize, state=state, code_verifier=code_verifier)
+                response = RedirectResponse(url=url)
+                set_login_cookie(response, state, code_verifier)
                 return response
 
         @asgi_app.get('/' + urlstrip(self.callback_authorize))
         async def route_callback(request: Request):
-            self.authlib.fetch_token(url=self.url_oauthtoken, authorization_response=str(request.url))
+            state = request.query_params.get("state")
             try:
+                code_verifier = request.cookies.get(self.LOGIN_COOKIE_PREFIX + state) if state else None
+                if not code_verifier:
+                    raise Unauthorized(status_code=400, message="Bad Request",
+                                       more_info="The sign-in request is invalid or has expired. Please sign in again.")
+
+                oauth = self._oauth_session(redirect_url)
+                try:
+                    oauth.fetch_token(url=self.url_oauthtoken, authorization_response=str(request.url),
+                                      state=state, code_verifier=code_verifier)
+                except AuthlibBaseError as exc:
+                    logger.warning(f"[auth] oidc - authorization code exchange failed: {exc.error}")
+                    raise Unauthorized(more_info="The identity provider rejected the sign-in. Please sign in again.")
+
                 host_url_path = urlpath(self.host_url)
                 response = RedirectResponse(url=host_url_path)
                 session_id = session_manager.generate_session_id()
@@ -250,7 +293,7 @@ class Oidc(Auth):
 
                 userinfo = {}
                 if self.url_userinfo:
-                    userinfo = self.authlib.get(self.url_userinfo).json()
+                    userinfo = oauth.get(self.url_userinfo).json()
 
                 if self.callback_func:
                     self.callback_func(request, session_id, userinfo)
@@ -259,17 +302,27 @@ class Oidc(Auth):
                     app_runner.set_userinfo(session_id=session_id, userinfo=userinfo)
 
                 response.set_cookie(key="session", value=session_id, httponly=True)
+                clear_login_cookie(response, state)
                 return response
             except Unauthorized as exc:
-                if self.unauthorized_action is not None:
-                    return self.unauthorized_action(request, exc)
-                else:
-                    templates = Jinja2Templates(directory=os.path.join(os.path.dirname(__file__), "templates"))
-                    return templates.TemplateResponse(request=request, name="auth_unauthorized.html", status_code=exc.status_code, context={
-                        "status_code": exc.status_code,
-                        "message": exc.message,
-                        "more_info": exc.more_info
-                    })
+                response = unauthorized_response(request, exc)
+                clear_login_cookie(response, state)
+                return response
+
+    def _oauth_session(self, redirect_url: str) -> OAuth2Session:
+        """
+        Builds a new OAuth2 client for a single login so that state, PKCE verifier and
+        tokens are never shared between users.
+        """
+        return OAuth2Session(
+            client_id=self.client_id,
+            client_secret=self.client_secret,
+            scope=self.scope.split(" "),
+            redirect_uri=redirect_url,
+            authorization_endpoint=self.url_authorize,
+            token_endpoint=self.url_oauthtoken,
+            code_challenge_method="S256",
+        )
 
 
 def Google(client_id: str, client_secret: str, host_url: str, app_static_public = False) -> Oidc:
