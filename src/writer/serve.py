@@ -70,9 +70,68 @@ from writer.ss_types import (
 if typing.TYPE_CHECKING:
     from .auth import Auth, Unauthorized
 
+def _env_number(name: str, default, cast_fn=int):
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        value = cast_fn(raw)
+    except ValueError:
+        logging.warning("Ignoring invalid value for %s: %r", name, raw)
+        return default
+    if value <= 0:
+        logging.warning("Ignoring non-positive value for %s: %r", name, raw)
+        return default
+    return value
+
+
+# Edit mode keeps a large limit for source file uploads from the Builder.
 MAX_WEBSOCKET_MESSAGE_SIZE = 201 * 1024 * 1024
+MAX_RUN_WEBSOCKET_MESSAGE_SIZE: int = _env_number(
+    "WRITER_MAX_RUN_WEBSOCKET_MESSAGE_SIZE", 5 * 1024 * 1024
+)
+MAX_WEBSOCKET_INFLIGHT_TASKS: int = _env_number("WRITER_MAX_WEBSOCKET_INFLIGHT_TASKS", 16)
+WEBSOCKET_RATE_LIMIT_PER_SECOND: float = _env_number(
+    "WRITER_WEBSOCKET_RATE_LIMIT_PER_SECOND", 20.0, float
+)
+WEBSOCKET_RATE_LIMIT_BURST: int = _env_number("WRITER_WEBSOCKET_RATE_LIMIT_BURST", 40)
+WEBSOCKET_MESSAGE_TOO_BIG_CODE = 1009
 BLUEPRINT_API_EXECUTION_TIMEOUT_SECONDS = int(os.getenv("AGENT_BUILDER_BLUEPRINT_API_EXECUTION_TIMEOUT", "600"))
 BLUEPRINT_API_RETRY_TIMEOUT = int(os.getenv("AGENT_BUILDER_BLUEPRINT_API_RETRY_TIMEOUT", "10000"))
+
+
+def get_max_websocket_message_size(serve_mode: ServeMode) -> int:
+    """
+    Largest websocket frame accepted from clients. Run mode is open to any visitor,
+    so it uses a much smaller limit than edit mode.
+    """
+    if serve_mode == "edit":
+        return MAX_WEBSOCKET_MESSAGE_SIZE
+    return MAX_RUN_WEBSOCKET_MESSAGE_SIZE
+
+
+class WebsocketMessageTooBig(Exception):
+    pass
+
+
+class _TokenBucket:
+    """Delays callers so that, on average, at most `rate` acquisitions happen per second."""
+
+    def __init__(self, rate: float, burst: int):
+        self.rate = rate
+        self.capacity = float(max(burst, 1))
+        self.tokens = self.capacity
+        self.updated_at = time.monotonic()
+
+    async def acquire(self) -> None:
+        while True:
+            now = time.monotonic()
+            self.tokens = min(self.capacity, self.tokens + (now - self.updated_at) * self.rate)
+            self.updated_at = now
+            if self.tokens >= 1:
+                self.tokens -= 1
+                return
+            await asyncio.sleep((1 - self.tokens) / self.rate)
 
 
 class WriterState(typing.Protocol):
@@ -129,6 +188,7 @@ def get_asgi_app(
     _fix_mimetype()
     app_runner = AppRunner(user_app_path, serve_mode)
     pending_tasks: Set[asyncio.Task] = set()
+    max_websocket_message_size = get_max_websocket_message_size(serve_mode)
 
     @asynccontextmanager
     async def lifespan(asgi_app: FastAPI):
@@ -203,6 +263,7 @@ def get_asgi_app(
     def _get_run_starter_pack(payload: InitSessionResponsePayload):
         return InitResponseBodyRun(
             mode="run",
+            maxWebsocketMessageSize=max_websocket_message_size,
             sessionId=payload.sessionId,
             userState=payload.userState,
             mail=payload.mail,
@@ -219,6 +280,7 @@ def get_asgi_app(
 
         return InitResponseBodyEdit(
             mode="edit",
+            maxWebsocketMessageSize=max_websocket_message_size,
             sessionId=payload.sessionId,
             userState=payload.userState,
             mail=payload.mail,
@@ -656,6 +718,24 @@ def get_asgi_app(
         except (RuntimeError, WebSocketDisconnect):
             await app_runner.queue_message(session_id, data)
 
+    async def _receive_json(websocket: WebSocket) -> Any:
+        """
+        Receives a JSON frame, rejecting it before decoding if it exceeds the
+        mode's size limit. Enforced here as well as in uvicorn because
+        get_asgi_app() can be mounted under a server with a larger ws_max_size.
+        """
+        message = await websocket.receive()
+        if message["type"] == "websocket.disconnect":
+            raise WebSocketDisconnect(message.get("code", 1000), message.get("reason"))
+        data = message.get("text")
+        if data is None:
+            data = message.get("bytes") or b""
+        if len(data) > max_websocket_message_size or (
+            isinstance(data, str) and len(data.encode("utf-8")) > max_websocket_message_size
+        ):
+            raise WebsocketMessageTooBig()
+        return json.loads(data)
+
     async def _stream_session_init(websocket: WebSocket):
         """
         Waits for the client to provide a session id to initialise the stream.
@@ -664,7 +744,7 @@ def get_asgi_app(
 
         session_id = None
         while session_id is None:
-            req_message_raw = await websocket.receive_json()
+            req_message_raw = await _receive_json(websocket)
 
             try:
                 req_message = WriterWebsocketIncoming.model_validate(req_message_raw)
@@ -679,11 +759,19 @@ def get_asgi_app(
     async def _stream_incoming_requests(websocket: WebSocket, session_id: str):
         """
         Handles incoming requests from client.
+
+        Messages are rate limited and at most MAX_WEBSOCKET_INFLIGHT_TASKS handlers
+        run concurrently per connection; once saturated, no further frames are read
+        until a handler finishes.
         """
+
+        rate_limiter = _TokenBucket(WEBSOCKET_RATE_LIMIT_PER_SECOND, WEBSOCKET_RATE_LIMIT_BURST)
+        inflight = asyncio.Semaphore(MAX_WEBSOCKET_INFLIGHT_TASKS)
 
         try:
             while True:
-                req_message_raw = await websocket.receive_json()
+                req_message_raw = await _receive_json(websocket)
+                await rate_limiter.acquire()
 
                 try:
                     req_message = WriterWebsocketIncoming.model_validate(req_message_raw)
@@ -695,32 +783,33 @@ def get_asgi_app(
                 if not is_session_ok:
                     break
 
-                new_task = None
+                handler: Optional[Callable[..., typing.Coroutine[Any, Any, None]]] = None
 
                 if req_message.type == "event":
-                    new_task = asyncio.create_task(
-                        _handle_incoming_event(websocket, session_id, req_message)
-                    )
+                    handler = _handle_incoming_event
                 elif req_message.type == "keepAlive":
-                    new_task = asyncio.create_task(
-                        _handle_keep_alive_message(websocket, session_id, req_message)
-                    )
+                    handler = _handle_keep_alive_message
                 elif req_message.type == "stateEnquiry":
-                    new_task = asyncio.create_task(
-                        _handle_state_enquiry_message(websocket, session_id, req_message)
-                    )
+                    handler = _handle_state_enquiry_message
                 elif serve_mode == "edit" and req_message.type == "hashRequest":
-                    new_task = asyncio.create_task(
-                        _handle_hash_request(websocket, session_id, req_message)
-                    )
+                    handler = _handle_hash_request
                 elif serve_mode == "edit":
-                    new_task = asyncio.create_task(
-                        _handle_incoming_edit_message(websocket, session_id, req_message)
-                    )
+                    handler = _handle_incoming_edit_message
 
-                if new_task:
-                    pending_tasks.add(new_task)
-                    new_task.add_done_callback(pending_tasks.discard)
+                if handler is None:
+                    continue
+
+                await inflight.acquire()
+                new_task = asyncio.create_task(handler(websocket, session_id, req_message))
+                pending_tasks.add(new_task)
+                new_task.add_done_callback(pending_tasks.discard)
+                new_task.add_done_callback(lambda _: inflight.release())
+        except WebsocketMessageTooBig:
+            logging.warning("Closing websocket: incoming message exceeds %d bytes.", max_websocket_message_size)
+            with suppress(RuntimeError, WebSocketDisconnect):
+                await websocket.close(code=WEBSOCKET_MESSAGE_TOO_BIG_CODE)
+        except json.JSONDecodeError:
+            logging.error("Incorrect incoming request.")
         except WebSocketDisconnect:
             return
         except asyncio.CancelledError:
@@ -910,6 +999,12 @@ def get_asgi_app(
             session_id = await _stream_session_init(websocket)
         except WebSocketDisconnect:
             return
+        except WebsocketMessageTooBig:
+            await websocket.close(code=WEBSOCKET_MESSAGE_TOO_BIG_CODE)
+            return
+        except json.JSONDecodeError:
+            await websocket.close(code=1003)
+            return
 
         is_session_ok = await app_runner.check_session(session_id)
         if not is_session_ok:
@@ -1059,7 +1154,11 @@ def serve(
     )
     log_level = "warning"
     uvicorn.run(
-        app, host=host, port=port, log_level=log_level, ws_max_size=MAX_WEBSOCKET_MESSAGE_SIZE
+        app,
+        host=host,
+        port=port,
+        log_level=log_level,
+        ws_max_size=get_max_websocket_message_size(mode),
     )
 
 
@@ -1077,7 +1176,7 @@ async def lifespan(app: FastAPI):
     >>> sub_asgi_app_1 = writer.serve.get_asgi_app("../app1", "run")
     >>> sub_asgi_app_2 = writer.serve.get_asgi_app("../app2", "run")
     >>>
-    >>> uvicorn.run(root_asgi_app, ws_max_size=writer.serve.MAX_WEBSOCKET_MESSAGE_SIZE)
+    >>> uvicorn.run(root_asgi_app, ws_max_size=writer.serve.get_max_websocket_message_size("run"))
 
     Writer Framework uses lifespan to start an application server (app_runner) per
     application.

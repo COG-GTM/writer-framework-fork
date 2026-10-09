@@ -53,7 +53,7 @@ See the stubs for more details.
 					<WdsIcon name="triangle-alert" />
 					<span>
 						Size limit of
-						{{ prettyBytes(MAX_FILE_SIZE) }} exceeded.
+						{{ prettyBytes(maxFileSize) }} exceeded.
 					</span>
 				</div>
 				<WdsControl
@@ -328,7 +328,10 @@ export default {
 };
 </script>
 <script setup lang="ts">
-import { useFilesEncoder } from "@/composables/useFilesEncoder/useFilesEncoder";
+import {
+	getMaxEncodedFilesSize,
+	useFilesEncoder,
+} from "@/composables/useFilesEncoder/useFilesEncoder";
 import { useLogger } from "@/composables/useLogger";
 import injectionKeys from "@/injectionKeys";
 import { optimizeImage } from "@/utils/img";
@@ -381,10 +384,13 @@ const { files, calcTotalSize, addFiles, removeFile, clearFiles, encodeFiles } =
 		multiple: isMultipleFilesAllowed,
 	});
 
-const MAX_FILE_SIZE = 200 * 1024 * 1024;
+const wf = inject(injectionKeys.core);
+const maxFileSize = computed(() =>
+	getMaxEncodedFilesSize(wf.maxWebsocketMessageSize?.value, 200 * 1024 * 1024),
+);
 
 const isUploadSizeExceeded = computed(
-	() => calcTotalSize(files.value) > MAX_FILE_SIZE,
+	() => calcTotalSize(files.value) > maxFileSize.value,
 );
 
 const displayExtraLoader = computed(() => {

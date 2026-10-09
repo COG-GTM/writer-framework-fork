@@ -8,7 +8,7 @@
 			<SharedDropZone
 				:multiple="isMultipleFilesAllowed"
 				:accepted-file-types="acceptedFileTypes"
-				:total-size-limit="MAX_FILE_SIZE"
+				:total-size-limit="maxFileSize"
 				@drop="handleUploadFiles"
 			/>
 			<ul v-if="files.length > 0" class="file-list">
@@ -96,7 +96,10 @@ import { computed, inject, onMounted, ref } from "vue";
 import prettyBytes from "pretty-bytes";
 import injectionKeys from "@/injectionKeys";
 import { useFormValueBroker } from "@/renderer/useFormValueBroker";
-import { useFilesEncoder } from "@/composables/useFilesEncoder/useFilesEncoder";
+import {
+	getMaxEncodedFilesSize,
+	useFilesEncoder,
+} from "@/composables/useFilesEncoder/useFilesEncoder";
 import SharedFile from "@/components/shared/SharedFile.vue";
 import SharedDropZone from "@/components/shared/SharedDropZone.vue";
 
@@ -132,14 +135,16 @@ onMounted(async () => {
 	}
 });
 
-const MAX_FILE_SIZE = 200 * 1024 * 1024;
+const maxFileSize = computed(() =>
+	getMaxEncodedFilesSize(wf.maxWebsocketMessageSize?.value, 200 * 1024 * 1024),
+);
 const isUploading = ref(false);
 const uploadingErrorMessage = ref<string | null>(null);
 async function handleUploadFiles(files: File[]) {
 	if (isUploading.value) return;
 
-	if (calcTotalSize(files) > MAX_FILE_SIZE) {
-		uploadingErrorMessage.value = `Files are too big. Total size limit is ${prettyBytes(MAX_FILE_SIZE)}.`;
+	if (calcTotalSize(files) > maxFileSize.value) {
+		uploadingErrorMessage.value = `Files are too big. Total size limit is ${prettyBytes(maxFileSize.value)}.`;
 
 		return;
 	}

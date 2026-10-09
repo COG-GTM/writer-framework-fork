@@ -58,6 +58,7 @@ export function buildMockCore() {
 	core.userStateInitial = userStateInitial;
 	core.sourceFiles = sourceFiles;
 	core.featureFlags = featureFlags;
+	core.maxWebsocketMessageSize = ref<number | null>(null);
 	core.writerApplication = writerApplication;
 	core.mode = mode;
 	const frontendMessageMap = ref<
