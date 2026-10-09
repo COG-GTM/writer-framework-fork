@@ -93,6 +93,7 @@ class Evaluator:
         field_key: str,
         default_field_value="",
         base_context={},
+        mode="exec",
     ) -> Tuple[str, Dict[str, Any]]:
         """
         Prepares a field holding Python source (e.g. an If-Else expression or a Code block)
@@ -102,6 +103,7 @@ class Evaluator:
         placeholder variable and its value is returned in the bindings, which the caller
         must add to the globals used for execution. Templates used as the content of a
         string literal (e.g. "@{payload}" == "yes") are bound as text, as before.
+        `mode` is the compile() mode the source is meant for ("exec" or "eval").
         """
 
         component_id = instance_path[-1]["componentId"]
@@ -126,21 +128,20 @@ class Evaluator:
         source = self.TEMPLATE_REGEX.sub(replacer, field_value)
         if not values:
             return source, {}
-        return self._bind_code_templates(source, prefix, values, field_key)
+        return self._bind_code_templates(source, prefix, values, field_key, mode)
 
     def _bind_code_templates(
-        self, source: str, prefix: str, values: List[Any], field_key: str
+        self, source: str, prefix: str, values: List[Any], field_key: str, mode: str
     ) -> Tuple[str, Dict[str, Any]]:
         placeholder_regex = re.compile(re.escape(prefix) + r"\d+__")
         bindings: Dict[str, Any] = {f"{prefix}{i}__": value for i, value in enumerate(values)}
-        text_values = {
-            name: value if isinstance(value, str) else json.dumps(value)
-            for name, value in bindings.items()
-        }
         substitute_name = f"{prefix}substitute__"
 
+        def as_text(value: Any) -> str:
+            return value if isinstance(value, str) else json.dumps(value)
+
         def substitute(literal: str) -> str:
-            return placeholder_regex.sub(lambda m: text_values[m.group(0)], literal)
+            return placeholder_regex.sub(lambda m: as_text(bindings[m.group(0)]), literal)
 
         line_offsets = [0]
         for line in io.StringIO(source).readlines():
@@ -155,41 +156,76 @@ class Evaluator:
             # Invalid source; compile() will report it. Placeholders stay plain names.
             return source, bindings
 
-        unsupported_error = WriterConfigurationError(
-            f"Templates (@{{...}}) can't be used inside f-strings or bytes literals in the field `{field_key}`. "
-            'Reference the value as a variable instead, for example state["my_var"], payload or result.'
-        )
+        def unsupported(where: str) -> WriterConfigurationError:
+            return WriterConfigurationError(
+                f"Templates (@{{...}}) can't be used in {where} in the field `{field_key}`. "
+                'Reference the value as a variable instead, for example state["my_var"], payload or result.'
+            )
+
+        statement_start_types = (tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT)
+        insignificant_types = (tokenize.NL, tokenize.COMMENT)
+        significant = [t for t in tokens if t.type not in insignificant_types]
+
+        # Indexes (in `significant`) of tokens that are part of match/case patterns,
+        # where only literals are allowed.
+        case_pattern: set = set()
+        if mode == "exec":
+            for i, token in enumerate(significant):
+                at_statement_start = i == 0 or significant[i - 1].type in statement_start_types
+                if not (at_statement_start and token.type == tokenize.NAME and token.string == "case"):
+                    continue
+                if i + 1 < len(significant) and significant[i + 1].string in (":", "=", ".", ","):
+                    continue
+                depth = 0
+                for j in range(i + 1, len(significant)):
+                    current = significant[j]
+                    if current.type == tokenize.NEWLINE:
+                        break
+                    if current.string in ("(", "[", "{"):
+                        depth += 1
+                    elif current.string in (")", "]", "}"):
+                        depth -= 1
+                    elif depth == 0 and (current.string == ":" or current.string == "if"):
+                        case_pattern.update(range(i + 1, j))
+                        break
 
         # Runs of adjacent string literals (implicitly concatenated) that contain placeholders
         # are wrapped in a call that replaces the placeholders with the text of their values
         # at runtime, so the values never become part of the source.
         edits: List[Tuple[int, int]] = []
-        run_start: Optional[int] = None
-        run_end = 0
-        run_has_placeholder = False
-        for token in tokens:
+        i = 0
+        while i < len(significant):
+            token = significant[i]
             has_placeholder = placeholder_regex.search(token.string) is not None
-            if token.type == tokenize.STRING:
-                if has_placeholder:
-                    string_prefix = self.STRING_PREFIX_REGEX.match(token.string).group(0).lower()  # type: ignore[union-attr]
-                    if "f" in string_prefix or "b" in string_prefix:
-                        raise unsupported_error
-                    run_has_placeholder = True
-                if run_start is None:
-                    run_start = offset(token.start)
-                run_end = offset(token.end)
+            if token.type != tokenize.STRING:
+                if has_placeholder and token.type != tokenize.NAME:
+                    # e.g. the literal parts of f-strings, tokenized separately since Python 3.12
+                    raise unsupported("f-strings or bytes literals")
+                i += 1
                 continue
-            if token.type in (tokenize.NL, tokenize.COMMENT) and run_start is not None:
+
+            run_first = i
+            while i + 1 < len(significant) and significant[i + 1].type == tokenize.STRING:
+                i += 1
+            run = significant[run_first : i + 1]
+            i += 1
+            if not any(placeholder_regex.search(t.string) for t in run):
                 continue
-            if run_start is not None and run_has_placeholder:
-                edits.append((run_start, run_end))
-            run_start = None
-            run_has_placeholder = False
-            if has_placeholder and token.type not in (tokenize.NAME, tokenize.COMMENT):
-                # e.g. the literal parts of f-strings, tokenized separately since Python 3.12
-                raise unsupported_error
-        if run_start is not None and run_has_placeholder:
-            edits.append((run_start, run_end))
+            for t in run:
+                string_prefix = self.STRING_PREFIX_REGEX.match(t.string).group(0).lower()  # type: ignore[union-attr]
+                if placeholder_regex.search(t.string) and ("f" in string_prefix or "b" in string_prefix):
+                    raise unsupported("f-strings or bytes literals")
+            if case_pattern.intersection(range(run_first, i)):
+                raise unsupported("match/case patterns")
+            if mode == "exec":
+                at_statement_start = run_first == 0 or significant[run_first - 1].type in statement_start_types
+                at_statement_end = i >= len(significant) or significant[i].type in (
+                    tokenize.NEWLINE,
+                    tokenize.ENDMARKER,
+                ) or significant[i].string == ";"
+                if at_statement_start and at_statement_end:
+                    raise unsupported("docstrings or bare string statements")
+            edits.append((offset(run[0].start), offset(run[-1].end)))
 
         for start, end in reversed(edits):
             source = f"{source[:start]}{substitute_name}({source[start:end]}){source[end:]}"

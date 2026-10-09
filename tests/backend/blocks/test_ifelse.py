@@ -136,3 +136,14 @@ def test_template_in_implicitly_concatenated_strings(session, runner):
 def test_template_in_bytes_rejected(session, runner):
     with pytest.raises(WriterConfigurationError):
         run_expression(session, runner, "b'@{payload}' == b'x'", {"payload": "x"})
+
+
+def test_non_json_template_values(session, runner):
+    block = run_expression(session, runner, "@{result} == b'ok'", {"result": b"ok"})
+    assert block.outcome == "true"
+
+
+def test_whole_quoted_template_expression(session, runner):
+    block = run_expression(session, runner, '"@{payload}"', {"payload": INJECTION})
+    assert block.outcome == "true"
+    assert "pwned" not in session.session_state

@@ -68,7 +68,7 @@ class IfElseBlock(BlueprintBlock):
 
     def run(self):
         try:
-            expression, template_bindings = self._get_code_field("expression")
+            expression, template_bindings = self._get_code_field("expression", mode="eval")
             writeruserapp = sys.modules.get("writeruserapp")
             block_globals = {
                 **self.execution_environment,
