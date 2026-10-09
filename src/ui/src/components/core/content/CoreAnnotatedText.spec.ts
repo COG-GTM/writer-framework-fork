@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import BaseMarkdownRaw from "../base/BaseMarkdownRaw.vue";
 import CoreAnnotatedText from "./CoreAnnotatedText.vue";
 import VueDOMPurifyHTML from "vue-dompurify-html";
@@ -87,5 +87,64 @@ describe("CoreAnnotatedText", async () => {
 		expect(
 			wrapper.getComponent(BaseMarkdownRaw).props().rawMarkdown,
 		).toMatchSnapshot();
+	});
+
+	it("should escape annotation content, subject and color in markdown mode", async () => {
+		const { core } = buildMockCore();
+
+		const wrapper = mount(CoreAnnotatedText, {
+			global: {
+				plugins: [VueDOMPurifyHTML],
+				provide: {
+					...mockProvides,
+					[injectionKeys.core as symbol]: core,
+					[injectionKeys.isBeingEdited as symbol]: ref(false),
+					[injectionKeys.evaluatedFields as symbol]: {
+						text: ref([
+							"Hello ",
+							[
+								'<a href="/phish">**click**</a>',
+								'<form action="/phish"></form>',
+								'red;position:fixed;inset:0;z-index:9999" title="x',
+							],
+							["ok", "Noun", "#faf"],
+							["themed", "Noun", "var(--accentColor)"],
+						]),
+						seed: ref(1),
+						useMarkdown: ref(true),
+						rotateHue: ref(false),
+						referenceColor: ref(WdsColor.Blue5),
+						copyButtons: ref(false),
+					},
+				},
+			},
+		});
+
+		const getRawMarkdown = () =>
+			wrapper.getComponent(BaseMarkdownRaw).props().rawMarkdown;
+		await vi.waitFor(() => expect(getRawMarkdown()).not.toBe(""));
+		const rawMarkdown = getRawMarkdown();
+
+		expect(rawMarkdown).not.toContain("<a ");
+		expect(rawMarkdown).not.toContain("<form");
+		expect(rawMarkdown).not.toContain("position:fixed");
+		expect(rawMarkdown).toContain(
+			"&lt;a href=&quot;/phish&quot;&gt;<strong>click</strong>&lt;/a&gt;",
+		);
+
+		await flushPromises();
+		const annotations = wrapper.findAll(".CoreAnnotatedText__annotation");
+		expect(annotations).toHaveLength(3);
+		// invalid color falls back to the reference color
+		expect(annotations.at(0).attributes().style).not.toContain("fixed");
+		expect(annotations.at(0).attributes().title).toBeUndefined();
+		expect(annotations.at(0).find("a").exists()).toBe(false);
+		expect(annotations.at(0).find("form").exists()).toBe(false);
+		expect(annotations.at(1).attributes().style).toContain(
+			"rgb(255,170,255)",
+		);
+		expect(annotations.at(2).attributes().style).toContain(
+			"var(--accentColor)",
+		);
 	});
 });

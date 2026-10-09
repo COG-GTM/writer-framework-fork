@@ -105,6 +105,7 @@ import chroma, { Color } from "chroma-js";
 import BaseEmptiness from "../base/BaseEmptiness.vue";
 import BaseMarkdownRaw from "../base/BaseMarkdownRaw.vue";
 import { defineAsyncComponentWithLoader } from "@/utils/defineAsyncComponentWithLoader";
+import { escapeHtml } from "@/utils/html";
 
 const SharedCopyClipboardButton = defineAsyncComponentWithLoader({
 	loader: () => import("@/components/shared/SharedCopyClipboardButton.vue"),
@@ -156,10 +157,12 @@ function useMarkdownRenderer() {
 	function RawAnnotation(element: AnnotatedTextElementArray) {
 		const [content, subject] = element;
 		const subjectEl = subject
-			? `<span class="CoreAnnotatedText__annotation__subject">${subject}</span>`
+			? `<span class="CoreAnnotatedText__annotation__subject">${escapeHtml(subject)}</span>`
 			: "";
+		const bgColor = toCssColor(getAnnotationBgColor(element));
+		const style = bgColor ? ` style="background: ${bgColor}"` : "";
 
-		return `<span class="CoreAnnotatedText__annotation" style="background: ${getAnnotationBgColor(element)}">${content}${subjectEl}</span>`;
+		return `<span class="CoreAnnotatedText__annotation"${style}>${escapeHtml(content)}${subjectEl}</span>`;
 	}
 
 	async function parseMarkdown() {
@@ -213,13 +216,35 @@ function calculateColorStep(s: string, stepsLength = COLOR_STEPS.length) {
 	return step;
 }
 
+const CSS_VAR_COLOR = /^var\(--[\w-]+\)$/;
+const CSS_COLOR_KEYWORDS = new Set(["transparent", "currentcolor"]);
+
+function isSafeCssColor(color: unknown): color is string {
+	if (typeof color !== "string") return false;
+	const value = color.trim();
+	return (
+		chroma.valid(value) ||
+		CSS_VAR_COLOR.test(value) ||
+		CSS_COLOR_KEYWORDS.has(value.toLowerCase())
+	);
+}
+
+function toCssColor(color: unknown): string | undefined {
+	if (!isSafeCssColor(color)) return undefined;
+	const value = color.trim();
+	return chroma.valid(value) ? chroma(value).css() : value;
+}
+
 function getAnnotationBgColor(content: AnnotatedTextElementArray) {
-	return content[2] || generateColor(content[1]);
+	const color = content[2];
+	if (isSafeCssColor(color)) return color;
+	return generateColor(content[1]);
 }
 
 function generateColor(s: string) {
 	if (!fields.rotateHue.value) {
-		return fields.referenceColor.value;
+		const referenceColor = fields.referenceColor.value;
+		return isSafeCssColor(referenceColor) ? referenceColor : undefined;
 	}
 
 	const baseColor = chroma(fields.referenceColor.value);
