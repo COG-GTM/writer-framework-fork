@@ -406,3 +406,68 @@ class TestServe:
             response_json = res.json()
             assert response_json["status"] == "error"
             assert "Project saver process is not running" in response_json["message"]
+
+    @pytest.mark.parametrize("path,body", [
+        ("/api/data/retrieve", {}),
+        ("/api/data/delete", {"keys": ["wf-journal-x"]}),
+    ])
+    def test_data_endpoints_forbidden_in_run_mode(self, monkeypatch, path, body):
+        import writer.keyvalue_storage
+
+        class _FailingStorage:
+            def __getattr__(self, name):
+                raise AssertionError("KV storage must not be accessed")
+
+        monkeypatch.setattr(writer.keyvalue_storage, "writer_kv_storage", _FailingStorage())
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "run")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            res = client.post(path, json=body, headers={"Origin": "http://localhost"})
+            assert res.status_code == 403
+
+    @pytest.mark.parametrize("path,body", [
+        ("/api/data/retrieve", {}),
+        ("/api/data/delete", {"keys": ["wf-journal-x"]}),
+    ])
+    def test_data_endpoints_reject_remote_origin_in_edit_mode(self, monkeypatch, path, body):
+        import writer.keyvalue_storage
+
+        class _FailingStorage:
+            def __getattr__(self, name):
+                raise AssertionError("KV storage must not be accessed")
+
+        monkeypatch.setattr(writer.keyvalue_storage, "writer_kv_storage", _FailingStorage())
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "edit")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            res = client.post(path, json=body, headers={"Origin": "http://evil.example.com"})
+            assert res.status_code == 403
+            res = client.post(path, json=body)
+            assert res.status_code == 403
+
+    def test_data_endpoints_allowed_in_edit_mode_with_local_origin(self, monkeypatch):
+        import writer.keyvalue_storage
+
+        class _MemoryStorage:
+            def __init__(self):
+                self.data = {"wf-journal-1": {"a": 1}, "other": {"b": 2}}
+
+            def get_data_keys(self):
+                return list(self.data.keys())
+
+            def get(self, key, type_):
+                return {"data": self.data[key]}
+
+            def delete(self, key):
+                del self.data[key]
+                return {"key": key}
+
+        storage = _MemoryStorage()
+        monkeypatch.setattr(writer.keyvalue_storage, "writer_kv_storage", storage)
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "edit")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            headers = {"Origin": "http://localhost:4005"}
+            res = client.post("/api/data/retrieve", json={"key_contains": "wf-journal-"}, headers=headers)
+            assert res.status_code == 200
+            assert res.json() == {"result": {"wf-journal-1": {"a": 1}}}
+            res = client.post("/api/data/delete", json={"keys": ["wf-journal-1"]}, headers=headers)
+            assert res.status_code == 200
+            assert "wf-journal-1" not in storage.data
