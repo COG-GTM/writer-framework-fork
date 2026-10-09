@@ -343,6 +343,7 @@ class WriterBlock(BlueprintBlock):
         execution_environment: Dict,
     ):
         super().__init__(component, runner, execution_environment)
+        self._writer_sdk_client: Optional[Writer] = None
 
         # Initialize the SDK client via block property
         # to set the context and enable logging for AI module downstream.
@@ -366,4 +367,6 @@ class WriterBlock(BlueprintBlock):
 
     @property
     def writer_sdk_client(self) -> Writer:
-        return self._acquire_writer_client()
+        if self._writer_sdk_client is None:
+            self._writer_sdk_client = self._acquire_writer_client()
+        return self._writer_sdk_client

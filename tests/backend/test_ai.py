@@ -48,6 +48,7 @@ pytest ./tests/backend/test_ai.py --full-run
 import time
 from contextvars import ContextVar
 from datetime import datetime
+from typing import Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -1203,6 +1204,149 @@ def test_attribution_extra_body_none_when_no_agent_id(
     assert WriterAIManager.get_attribution_extra_body(None) is None
     user_body = {"key": "val"}
     assert WriterAIManager.get_attribution_extra_body(user_body) is user_body
+
+
+# --------------------------------------------------------------------------
+# Session scoping of the cached Writer SDK client
+#
+# AppProcess serves requests on pooled worker threads, so a context can
+# outlive a request. The cached client carries the session's X-Agent-Token
+# and a block's logging HTTPX client and must never be handed to another
+# session or another block.
+# --------------------------------------------------------------------------
+
+
+def _make_session(session_id, headers):
+    session = _make_stub_session(headers)
+    session.session_id = session_id
+    return session
+
+
+@pytest.fixture
+def fake_writer_clients(monkeypatch):
+    created = []
+
+    def fake_writer_init(self, **kwargs):
+        self.default_headers = kwargs.get("default_headers")
+        self.http_client = kwargs.get("http_client")
+        created.append(self)
+
+    monkeypatch.setattr("writer.ai.Writer.__init__", fake_writer_init)
+    monkeypatch.setattr("writer.ai._ai_client", ContextVar("ai_client", default=None))
+    monkeypatch.setattr("writer.ai._ai_agent_id", ContextVar("ai_agent_id", default=None))
+    return created
+
+
+@pytest.mark.set_token("fake_token")
+def test_acquire_client_reuses_client_within_session(
+    emulate_app_process, monkeypatch, fake_writer_clients
+):
+    session = _make_session("session-a", {"x-agent-token": "token-a"})
+    monkeypatch.setattr("writer.core.get_session", lambda: session)
+
+    first = WriterAIManager.acquire_client()
+    second = WriterAIManager.acquire_client()
+
+    assert first is second
+    assert len(fake_writer_clients) == 1
+
+
+@pytest.mark.set_token("fake_token")
+def test_acquire_client_not_reused_across_sessions(
+    emulate_app_process, monkeypatch, fake_writer_clients
+):
+    session_a = _make_session("session-a", {"x-agent-token": "token-a"})
+    session_b = _make_session("session-b", {"x-agent-token": "token-b"})
+
+    monkeypatch.setattr("writer.core.get_session", lambda: session_a)
+    client_a = WriterAIManager.acquire_client()
+
+    monkeypatch.setattr("writer.core.get_session", lambda: session_b)
+    client_b = WriterAIManager.acquire_client()
+
+    assert client_a is not client_b
+    assert client_a.default_headers == {"X-Agent-Token": "token-a"}
+    assert client_b.default_headers == {"X-Agent-Token": "token-b"}
+
+
+@pytest.mark.set_token("fake_token")
+def test_acquire_client_not_reused_when_agent_token_changes(
+    emulate_app_process, monkeypatch, fake_writer_clients
+):
+    session = _make_session("session-a", {"x-agent-token": "token-a"})
+    monkeypatch.setattr("writer.core.get_session", lambda: session)
+    client_a = WriterAIManager.acquire_client()
+
+    session.headers = {"x-agent-token": "token-rotated"}
+    client_b = WriterAIManager.acquire_client()
+
+    assert client_a is not client_b
+    assert client_b.default_headers == {"X-Agent-Token": "token-rotated"}
+
+
+@pytest.mark.set_token("fake_token")
+def test_acquire_client_not_reused_when_session_ends(
+    emulate_app_process, monkeypatch, fake_writer_clients
+):
+    session = _make_session("session-a", {"x-agent-token": "token-a"})
+    monkeypatch.setattr("writer.core.get_session", lambda: session)
+    client_a = WriterAIManager.acquire_client()
+
+    monkeypatch.setattr("writer.core.get_session", lambda: None)
+    client_none = WriterAIManager.acquire_client()
+
+    assert client_none is not client_a
+    assert client_none.default_headers == {}
+
+
+@pytest.mark.set_token("fake_token")
+def test_acquire_client_binds_custom_httpx_client(
+    emulate_app_process, monkeypatch, fake_writer_clients
+):
+    session = _make_session("session-a", {"x-agent-token": "token-a"})
+    monkeypatch.setattr("writer.core.get_session", lambda: session)
+    http_a = object()
+    http_b = object()
+
+    client_a = WriterAIManager.acquire_client(custom_httpx_client=http_a)
+    assert WriterAIManager.acquire_client(custom_httpx_client=http_a) is client_a
+    # Downstream calls without an explicit HTTPX client reuse the block's client
+    assert WriterAIManager.acquire_client() is client_a
+
+    client_b = WriterAIManager.acquire_client(custom_httpx_client=http_b)
+    assert client_b is not client_a
+    assert client_b.http_client is http_b
+    assert WriterAIManager.acquire_client() is client_b
+
+
+def test_app_process_messages_do_not_share_context():
+    """A pooled AppProcess thread must not carry one message's contextvars
+    (and so its cached AI client) into the next message.
+    """
+    import concurrent.futures
+
+    from writer.app_runner import AppProcess
+
+    probe: ContextVar[Optional[str]] = ContextVar("probe", default=None)
+    seen = []
+
+    class _FakeProcess:
+        def _handle_message(self, session_id, request):
+            seen.append(probe.get())
+            probe.set(session_id)
+            return session_id
+
+    fake = _FakeProcess()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        for session_id in ("session-a", "session-b"):
+            executor.submit(
+                AppProcess._handle_message_and_get_packet,
+                fake, 1, session_id, None
+            ).result()
+        leaked = executor.submit(probe.get).result()
+
+    assert seen == [None, None]
+    assert leaked is None
 
 
 def test_create_graph(mock_graphs_accessor):
