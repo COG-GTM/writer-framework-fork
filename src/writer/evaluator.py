@@ -1,6 +1,8 @@
+import io
 import json
 import os
 import re
+import tokenize
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import writer.core
@@ -23,6 +25,7 @@ class Evaluator:
 
     TEMPLATE_REGEX = re.compile(r"[\\]?@{([^{]*?)}")
     CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+    STRING_PREFIX_REGEX = re.compile(r"^[A-Za-z]*")
 
     def __init__(self, state: "WriterState", component_tree: "ComponentTree"):
         self.state = state
@@ -83,6 +86,117 @@ class Evaluator:
             replaced = decode_json(replaced)
 
         return replaced
+
+    def evaluate_code_field(
+        self,
+        instance_path: InstancePath,
+        field_key: str,
+        default_field_value="",
+        base_context={},
+    ) -> Tuple[str, Dict[str, Any]]:
+        """
+        Prepares a field holding Python source (e.g. an If-Else expression or a Code block)
+        for compile()/eval()/exec().
+
+        Template values are never spliced into the source. Each template is replaced by a
+        placeholder variable and its value is returned in the bindings, which the caller
+        must add to the globals used for execution. Templates used as the content of a
+        string literal (e.g. "@{payload}" == "yes") are bound as text, as before.
+        """
+
+        component_id = instance_path[-1]["componentId"]
+        component = self.component_tree.get_component(component_id)
+        if not component:
+            raise ValueError(f'Component with id "{component_id}" not found.')
+
+        field_value = component.content.get(field_key) or default_field_value
+        prefix = "__wf_template_"
+        while prefix in field_value:
+            prefix += "_"
+
+        values: List[Any] = []
+
+        def replacer(matched: re.Match):
+            if matched.group(0)[0] == "\\":  # Escaped @, don't evaluate
+                return matched.group(0)
+            expr = matched.group(1).strip()
+            values.append(self.evaluate_expression(expr, instance_path, base_context))
+            return f"{prefix}{len(values) - 1}__"
+
+        source = self.TEMPLATE_REGEX.sub(replacer, field_value)
+        if not values:
+            return source, {}
+        return self._bind_code_templates(source, prefix, values, field_key)
+
+    def _bind_code_templates(
+        self, source: str, prefix: str, values: List[Any], field_key: str
+    ) -> Tuple[str, Dict[str, Any]]:
+        placeholder_regex = re.compile(re.escape(prefix) + r"\d+__")
+        bindings: Dict[str, Any] = {f"{prefix}{i}__": value for i, value in enumerate(values)}
+        text_values = {
+            name: value if isinstance(value, str) else json.dumps(value)
+            for name, value in bindings.items()
+        }
+        substitute_name = f"{prefix}substitute__"
+
+        def substitute(literal: str) -> str:
+            return placeholder_regex.sub(lambda m: text_values[m.group(0)], literal)
+
+        line_offsets = [0]
+        for line in io.StringIO(source).readlines():
+            line_offsets.append(line_offsets[-1] + len(line))
+
+        def offset(position: Tuple[int, int]) -> int:
+            return line_offsets[position[0] - 1] + position[1]
+
+        try:
+            tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
+        except (tokenize.TokenError, SyntaxError):
+            # Invalid source; compile() will report it. Placeholders stay plain names.
+            return source, bindings
+
+        unsupported_error = WriterConfigurationError(
+            f"Templates (@{{...}}) can't be used inside f-strings or bytes literals in the field `{field_key}`. "
+            'Reference the value as a variable instead, for example state["my_var"], payload or result.'
+        )
+
+        # Runs of adjacent string literals (implicitly concatenated) that contain placeholders
+        # are wrapped in a call that replaces the placeholders with the text of their values
+        # at runtime, so the values never become part of the source.
+        edits: List[Tuple[int, int]] = []
+        run_start: Optional[int] = None
+        run_end = 0
+        run_has_placeholder = False
+        for token in tokens:
+            has_placeholder = placeholder_regex.search(token.string) is not None
+            if token.type == tokenize.STRING:
+                if has_placeholder:
+                    string_prefix = self.STRING_PREFIX_REGEX.match(token.string).group(0).lower()  # type: ignore[union-attr]
+                    if "f" in string_prefix or "b" in string_prefix:
+                        raise unsupported_error
+                    run_has_placeholder = True
+                if run_start is None:
+                    run_start = offset(token.start)
+                run_end = offset(token.end)
+                continue
+            if token.type in (tokenize.NL, tokenize.COMMENT) and run_start is not None:
+                continue
+            if run_start is not None and run_has_placeholder:
+                edits.append((run_start, run_end))
+            run_start = None
+            run_has_placeholder = False
+            if has_placeholder and token.type not in (tokenize.NAME, tokenize.COMMENT):
+                # e.g. the literal parts of f-strings, tokenized separately since Python 3.12
+                raise unsupported_error
+        if run_start is not None and run_has_placeholder:
+            edits.append((run_start, run_end))
+
+        for start, end in reversed(edits):
+            source = f"{source[:start]}{substitute_name}({source[start:end]}){source[end:]}"
+
+        if edits:
+            bindings[substitute_name] = substitute
+        return source, bindings
 
     def get_context_data(self, instance_path: InstancePath, base_context={}) -> Dict[str, Any]:
         context: Dict[str, Any] = base_context

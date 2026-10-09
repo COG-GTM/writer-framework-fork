@@ -39,3 +39,21 @@ print(1/0)
     with pytest.raises(ZeroDivisionError):
         block.run()
     assert block.outcome == "error"
+
+
+def test_template_values_are_not_spliced_into_code(session, runner, monkeypatch):
+    monkeypatch.setitem(sys.modules, "writeruserapp", types.ModuleType("fake_writeruserapp"))
+    injection = '") ; state["pwned"] = True ; set_output("'
+    component = session.add_fake_component(
+        {
+            "code": """
+greeting = "Hello @{payload}"
+set_output([greeting, @{payload}, '''@{payload}'''])
+"""
+        }
+    )
+    block = CodeBlock(component, runner, {"payload": injection})
+    block.run()
+    assert block.outcome == "success"
+    assert block.result == ["Hello " + injection, injection, injection]
+    assert "pwned" not in session.session_state
