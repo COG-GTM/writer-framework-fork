@@ -929,6 +929,7 @@ class TestEventDeserialiser:
         assert decode("data:,hello%20world") == b"hello world"
         assert decode("DATA:image/png;BASE64,aGk=") == b"hi"
         assert decode("data:;base64,") == b""
+        assert decode("data:;base64,aGk%3D") == b"hi"
 
     def test_data_url_size_limit(self) -> None:
         with mock.patch.object(EventDeserialiser, "MAX_DATA_URL_BYTES", 4):
@@ -940,6 +941,7 @@ class TestEventDeserialiser:
             with pytest.raises(RuntimeError):
                 self.ed.transform(ev)
             assert EventDeserialiser._decode_data_url("data:;base64,aGk=") == b"hi"
+            assert EventDeserialiser._decode_data_url("data:,A%41%41%41") == b"AAAA"
             with pytest.raises(ValueError):
                 EventDeserialiser._decode_data_url("data:,hello")
 
