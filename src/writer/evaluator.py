@@ -122,6 +122,12 @@ class Evaluator:
             expr_value = self.evaluate_expression(
                 matched.group(1).strip(), instance_path, base_context
             )
+            if expr_value is None or expr_value == "":
+                if matched.group(0) == field_value:
+                    return ""
+                raise WriterConfigurationError(
+                    f"A template in the state path of field `{field_key}` resolved to an empty value."
+                )
             if not isinstance(expr_value, str):
                 try:
                     expr_value = json.dumps(expr_value)
@@ -205,15 +211,13 @@ class Evaluator:
                 else:
                     state_ref = state_ref[accessor]
         except (KeyError, IndexError, TypeError, ValueError):
-            raise ValueError(
-                f'Reference "{expr}" cannot be translated to state. The path doesn\'t exist.'
-            ) from None
+            raise ValueError("The state reference can't be resolved. The path doesn't exist.") from None
 
         if not isinstance(
             state_ref, (writer.core.State, writer.core.WriterState, writer.core.StateProxy, dict)
         ):
             raise ValueError(
-                f'Reference "{expr}" cannot be translated to state. Found value of type "{type(state_ref)}".'
+                f'The state reference can\'t be written to. Found value of type "{type(state_ref).__name__}".'
             )
 
         state_ref[accessors[-1]] = value

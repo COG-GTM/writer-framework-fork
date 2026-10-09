@@ -118,3 +118,34 @@ def test_missing_path_error_does_not_leak_accessor_values(session, runner, monke
         block.run()
     assert block.outcome == "error"
     assert "top-secret" not in str(excinfo.value)
+
+
+def test_templated_full_path_missing_value_is_required_error(session, runner):
+    component = session.add_fake_component({"element": "@{payload.key}", "value": "my_value"})
+    block = SetState(component, runner, {"payload": {}})
+    with pytest.raises(WriterConfigurationError):
+        block.run()
+    assert block.outcome == "error"
+    assert "null" not in session.session_state.user_state.to_dict()
+
+
+def test_templated_path_segment_missing_value_is_rejected(session, runner):
+    session.session_state["answers"] = {"keep": True}
+    component = session.add_fake_component(
+        {"element": "answers.@{payload.key}", "value": "my_value"}
+    )
+    block = SetState(component, runner, {"payload": {}})
+    with pytest.raises(WriterConfigurationError):
+        block.run()
+    assert session.session_state["answers"].to_dict() == {"keep": True}
+
+
+def test_missing_path_error_does_not_leak_template_values(session, runner):
+    session.session_state["parent_element"] = {}
+    component = session.add_fake_component(
+        {"element": "parent_element.@{payload}.child", "value": "my_value"}
+    )
+    block = SetState(component, runner, {"payload": "top-secret"})
+    with pytest.raises(ValueError) as excinfo:
+        block.run()
+    assert "top-secret" not in str(excinfo.value)
