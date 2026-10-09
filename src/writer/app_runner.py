@@ -1165,7 +1165,9 @@ class AppRunner:
 
         - Copies all files and subdirectories from `src` to `dst`.
         - Creates any missing directories in `dst` to match `src`.
-        - Removes any files or directories in `dst` that do not exist in `src`.
+        - Removes any files or directories in `dst` that do not exist in `src`,
+          except those left out of exports (e.g. .env, .git), so that
+          reimporting an export doesn't delete local-only files.
         """
         # Create dst if it doesn't exist
         os.makedirs(dst, exist_ok=True)
@@ -1188,9 +1190,12 @@ class AppRunner:
         for root, dirs, files in os.walk(dst):
             rel_path = os.path.relpath(root, dst)
             src_path = os.path.join(src, rel_path)
+            dirs[:] = [d for d in dirs if not _is_excluded_from_export(d, is_dir=True)]
 
             # Remove files not in src
             for file in files:
+                if _is_excluded_from_export(file, is_dir=False):
+                    continue
                 dst_file = os.path.join(root, file)
                 src_file = os.path.join(src_path, file)
                 if not os.path.exists(src_file):

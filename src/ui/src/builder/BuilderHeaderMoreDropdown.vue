@@ -144,6 +144,7 @@ async function importModalConfirm() {
 		// Send POST request
 		const response = await fetch("./api/import", {
 			method: "POST",
+			headers: { "X-Writer-Session-Id": wf.getSessionId() },
 			body: formData,
 		});
 		if (!response.ok) {

@@ -505,6 +505,34 @@ class TestEditServerLocalProtection:
             res = client.post(path, json=body, headers={"Origin": "http://attacker.example"})
             assert res.status_code == 403
 
+    def test_import_requires_edit_session(self, tmp_path) -> None:
+        asgi_app = writer.serve.get_asgi_app(self._copy_app_with_secrets(tmp_path), "edit")
+        with fastapi.testclient.TestClient(asgi_app, base_url="http://localhost:4005") as client:
+            res = client.post(
+                "/api/import",
+                files={"file": ("agent.zip", b"PK", "application/zip")},
+                headers={"Origin": "http://localhost:3000"},
+            )
+            assert res.status_code == 403
+
+    def test_export_reimport_keeps_local_only_files(self, tmp_path) -> None:
+        import os
+        app_path = self._copy_app_with_secrets(tmp_path)
+        asgi_app = writer.serve.get_asgi_app(app_path, "edit")
+        with fastapi.testclient.TestClient(asgi_app, base_url="http://localhost:4005") as client:
+            session_id = self._init_session(client)
+            headers = {"X-Writer-Session-Id": session_id}
+            exported = client.get("/api/export", headers=headers)
+            assert exported.status_code == 200
+            res = client.post(
+                "/api/import",
+                files={"file": ("agent.zip", exported.content, "application/zip")},
+                headers=headers,
+            )
+            assert res.status_code == 200
+        for name in (".env", ".env.local", os.path.join(".git", "config"), "server.pem", "main.py"):
+            assert os.path.exists(os.path.join(app_path, name)), name
+
     def test_import_rejects_foreign_origin(self, tmp_path) -> None:
         asgi_app = writer.serve.get_asgi_app(self._copy_app_with_secrets(tmp_path), "edit")
         with fastapi.testclient.TestClient(asgi_app, base_url="http://localhost:4005") as client:
