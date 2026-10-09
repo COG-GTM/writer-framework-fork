@@ -16,7 +16,7 @@ class WriterKeyValueStorage(WriterBlock):
                 baseType="blueprints_node",
                 writer={
                     "name": "Key-Value Storage",
-                    "description": "Stores data between sessions. Uses unique keys (names) to identify the data. Keys can only contain alphanumeric characters, underscores, and hyphens.",
+                    "description": "Stores data between sessions. Uses unique keys (names) to identify the data. Keys can only contain alphanumeric characters, underscores, and hyphens. Keys starting with wf-journal- or wf-init-logs- are reserved for internal use.",
                     "category": "Writer",
                     "fields": {
                         "action": {
@@ -77,8 +77,13 @@ class WriterKeyValueStorage(WriterBlock):
             self.outcome = "error"
             raise e
 
+    @staticmethod
+    def _is_reserved_key(key: str) -> bool:
+        from writer.journal import INIT_LOGS_KEY_PREFIX, JOURNAL_KEY_PREFIX
+
+        return key.lower().startswith((JOURNAL_KEY_PREFIX, INIT_LOGS_KEY_PREFIX))
+
     def _execute_action(self):
-        from writer.journal import JOURNAL_KEY_PREFIX
         from writer.keyvalue_storage import KeyValueStorage
 
         action = self._get_field("action", default_field_value="Save")
@@ -88,11 +93,13 @@ class WriterKeyValueStorage(WriterBlock):
 
             if action == "List keys":
                 response = writer_kv_storage.get_data_keys()
-                return [key for key in response if not key.startswith(JOURNAL_KEY_PREFIX)]
+                return [key for key in response if not self._is_reserved_key(key)]
 
             key = self._get_field("key", required=True)
             if not ALLOWED_CHARS.fullmatch(key):
                 raise WriterConfigurationError("Key can only contain alphanumeric characters, underscores and hyphens")
+            if self._is_reserved_key(key):
+                raise WriterConfigurationError("This key is reserved for internal use and cannot be accessed")
 
             if action == "Save":
                 value_type = self._get_field("valueType")
