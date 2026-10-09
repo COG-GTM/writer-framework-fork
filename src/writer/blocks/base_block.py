@@ -51,6 +51,7 @@ class BlueprintBlock:
     ):
         self.outcome: Optional[str] = None
         self.message: Optional[str] = None
+        self.message_is_traceback = False
         self.component = component
         self.runner = runner
         self.execution_time_in_seconds = -1.0

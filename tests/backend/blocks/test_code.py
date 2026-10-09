@@ -41,7 +41,7 @@ print(1/0)
     assert block.outcome == "error"
 
 
-def test_run_code_error_message_is_escaped_code_block(session, runner, monkeypatch):
+def test_run_code_error_message_is_plain_traceback(session, runner, monkeypatch):
     fake_module = types.ModuleType("fake_writeruserapp")
     monkeypatch.setitem(sys.modules, "writeruserapp", fake_module)
     payload = "<img src=x onerror=alert(1)>"
@@ -50,7 +50,8 @@ def test_run_code_error_message_is_escaped_code_block(session, runner, monkeypat
     with pytest.raises(ValueError):
         block.run()
     assert block.outcome == "error"
-    assert block.message.startswith("```\nTraceback")
-    assert block.message.endswith("\n```")
+    assert block.message_is_traceback
+    assert block.message.startswith("Traceback")
     assert payload in block.message
     assert "<pre>" not in block.message
+    assert "```" not in block.message
