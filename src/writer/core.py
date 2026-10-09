@@ -1566,12 +1566,14 @@ class EventDeserialiser:
         header, sep, encoded = value[5:].partition(",")
         if not sep:
             raise ValueError("Malformed data: URL.")
-        if len(encoded) > cls.MAX_DATA_URL_BYTES * 4 // 3 + 4:
+        # Percent-encoding can triple the size of each byte
+        if len(encoded) > cls.MAX_DATA_URL_BYTES * 3:
             raise ValueError("Data exceeds maximum size.")
+        data = urllib.parse.unquote_to_bytes(encoded)
         if header.lower().endswith(";base64"):
-            data = base64.b64decode(encoded, validate=True)
-        else:
-            data = urllib.parse.unquote_to_bytes(encoded)
+            if len(data) > cls.MAX_DATA_URL_BYTES * 4 // 3 + 4:
+                raise ValueError("Data exceeds maximum size.")
+            data = base64.b64decode(data, validate=True)
         if len(data) > cls.MAX_DATA_URL_BYTES:
             raise ValueError("Data exceeds maximum size.")
         return data
