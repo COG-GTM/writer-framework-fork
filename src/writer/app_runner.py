@@ -398,6 +398,7 @@ class AppProcess(multiprocessing.Process):
             if not session:
                 raise MessageHandlingException("Session not found.")
             session.update_last_active_timestamp()
+            session.mark_engaged()
 
             if type == "checkSession":
                 return AppProcessServerResponse(status="ok", status_message=None, payload=None)

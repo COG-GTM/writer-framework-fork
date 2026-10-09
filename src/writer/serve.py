@@ -15,6 +15,7 @@ import textwrap
 import time
 import traceback
 import typing
+from collections import deque
 from contextlib import asynccontextmanager, suppress
 from importlib.machinery import ModuleSpec
 from typing import (
@@ -73,6 +74,46 @@ if typing.TYPE_CHECKING:
 MAX_WEBSOCKET_MESSAGE_SIZE = 201 * 1024 * 1024
 BLUEPRINT_API_EXECUTION_TIMEOUT_SECONDS = int(os.getenv("AGENT_BUILDER_BLUEPRINT_API_EXECUTION_TIMEOUT", "600"))
 BLUEPRINT_API_RETRY_TIMEOUT = int(os.getenv("AGENT_BUILDER_BLUEPRINT_API_RETRY_TIMEOUT", "10000"))
+INIT_RATE_LIMIT_REQUESTS = int(os.getenv("WRITER_INIT_RATE_LIMIT_REQUESTS", "60"))
+INIT_RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("WRITER_INIT_RATE_LIMIT_WINDOW_SECONDS", "60"))
+
+
+class ClientRateLimiter:
+    """
+    Sliding-window request limiter keyed by client address.
+    A max_requests value of 0 or less disables limiting.
+    """
+
+    MAX_TRACKED_CLIENTS = 10000
+
+    def __init__(self, max_requests: int, window_seconds: int) -> None:
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+        self._hits: Dict[str, deque] = {}
+
+    def _forget_stale_clients(self, cutoff: float) -> None:
+        for key in [k for k, hits in self._hits.items() if not hits or hits[-1] <= cutoff]:
+            del self._hits[key]
+        while len(self._hits) >= self.MAX_TRACKED_CLIENTS:
+            del self._hits[next(iter(self._hits))]
+
+    def allow(self, client_key: str) -> bool:
+        if self.max_requests <= 0:
+            return True
+        now = time.monotonic()
+        cutoff = now - self.window_seconds
+        hits = self._hits.get(client_key)
+        if hits is None:
+            if len(self._hits) >= self.MAX_TRACKED_CLIENTS:
+                self._forget_stale_clients(cutoff)
+            hits = deque()
+            self._hits[client_key] = hits
+        while hits and hits[0] <= cutoff:
+            hits.popleft()
+        if len(hits) >= self.max_requests:
+            return False
+        hits.append(now)
+        return True
 
 
 class WriterState(typing.Protocol):
@@ -129,6 +170,7 @@ def get_asgi_app(
     _fix_mimetype()
     app_runner = AppRunner(user_app_path, serve_mode)
     pending_tasks: Set[asyncio.Task] = set()
+    init_rate_limiter = ClientRateLimiter(INIT_RATE_LIMIT_REQUESTS, INIT_RATE_LIMIT_WINDOW_SECONDS)
 
     @asynccontextmanager
     async def lifespan(asgi_app: FastAPI):
@@ -350,6 +392,15 @@ def get_asgi_app(
             logging.error(wrong_origin_message, origin_header)
             raise HTTPException(
                 status_code=403, detail="Incorrect origin. Only local origins are allowed."
+            )
+
+        client_key = request.client.host if request.client else "unknown"
+        if not init_rate_limiter.allow(client_key):
+            logging.warning("Session init rate limit exceeded for client %s.", client_key)
+            raise HTTPException(
+                status_code=429,
+                detail="Too many session requests.",
+                headers={"Retry-After": str(INIT_RATE_LIMIT_WINDOW_SECONDS)},
             )
 
         session_id = request.cookies.get("session")

@@ -110,6 +110,22 @@ class TestServe:
             })
             assert res.status_code == 403
 
+    def test_init_rate_limited_per_client(self, monkeypatch) -> None:
+        monkeypatch.setattr(writer.serve, "INIT_RATE_LIMIT_REQUESTS", 2)
+        asgi_app: fastapi.FastAPI = writer.serve.get_asgi_app(
+            test_app_dir, "run")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            for _ in range(2):
+                res = client.post("/api/init", json={
+                    "proposedSessionId": None
+                })
+                assert res.status_code == 200
+            res = client.post("/api/init", json={
+                "proposedSessionId": None
+            })
+            assert res.status_code == 429
+            assert res.headers.get("retry-after") == str(writer.serve.INIT_RATE_LIMIT_WINDOW_SECONDS)
+
     def test_session_verifier_pass(self) -> None:
         asgi_app: fastapi.FastAPI = writer.serve.get_asgi_app(
             test_app_dir, "run")
@@ -406,3 +422,33 @@ class TestServe:
             response_json = res.json()
             assert response_json["status"] == "error"
             assert "Project saver process is not running" in response_json["message"]
+
+
+class TestClientRateLimiter:
+
+    def test_limits_each_client_separately(self) -> None:
+        limiter = writer.serve.ClientRateLimiter(2, 60)
+        assert limiter.allow("a")
+        assert limiter.allow("a")
+        assert not limiter.allow("a")
+        assert limiter.allow("b")
+
+    def test_window_expiry(self, monkeypatch) -> None:
+        now = [1000.0]
+        monkeypatch.setattr(writer.serve.time, "monotonic", lambda: now[0])
+        limiter = writer.serve.ClientRateLimiter(1, 60)
+        assert limiter.allow("a")
+        assert not limiter.allow("a")
+        now[0] += 61
+        assert limiter.allow("a")
+
+    def test_disabled_when_zero(self) -> None:
+        limiter = writer.serve.ClientRateLimiter(0, 60)
+        assert all(limiter.allow("a") for _ in range(100))
+
+    def test_tracked_clients_bounded(self, monkeypatch) -> None:
+        monkeypatch.setattr(writer.serve.ClientRateLimiter, "MAX_TRACKED_CLIENTS", 3)
+        limiter = writer.serve.ClientRateLimiter(5, 60)
+        for i in range(10):
+            assert limiter.allow(str(i))
+        assert len(limiter._hits) <= 3
