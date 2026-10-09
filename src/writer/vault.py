@@ -7,6 +7,7 @@ configuration and error handling.
 """
 
 import logging
+from collections import OrderedDict
 from typing import Dict, Optional, Tuple
 
 import httpx
@@ -15,13 +16,15 @@ from writer.keyvalue_storage import writer_kv_storage
 
 logger = logging.getLogger("vault")
 
+MAX_CACHED_TENANTS = 64
+
 
 class WriterVault:
     """Manages retrieval and caching of secrets from the Writer vault service."""
 
     def __init__(self) -> None:
         """Initialize vault with an empty per-tenant cache."""
-        self._secrets: Dict[Tuple[Optional[str], Optional[str]], Dict] = {}
+        self._secrets: "OrderedDict[Tuple[Optional[str], Optional[str]], Dict]" = OrderedDict()
 
     def get_secrets(self) -> Dict:
         """Get cached secrets for the current agent/org, fetching from vault if not already loaded."""
@@ -30,11 +33,15 @@ class WriterVault:
         if secrets is None:
             secrets = self._fetch()
             self._secrets[tenant] = secrets
+            while len(self._secrets) > MAX_CACHED_TENANTS:
+                self._secrets.popitem(last=False)
+        else:
+            self._secrets.move_to_end(tenant)
         return secrets
 
     def refresh(self):
         """Drop cached secrets for every agent/org so the next access refetches them."""
-        self._secrets = {}
+        self._secrets = OrderedDict()
 
     def _fetch(self) -> Dict:
         try:
