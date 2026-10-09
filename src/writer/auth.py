@@ -211,14 +211,18 @@ class Oidc(Auth):
         logger.debug(f"[auth] oidc - path: {host_url_path}")
         logger.debug(f"[auth] oidc - auth authorized routes: {auth_authorized_routes}")
         logger.debug(f"[auth] oidc - auth authorized prefix paths: {auth_authorized_prefix_paths}")
-        self.authlib = OAuth2Session(
-            client_id=self.client_id,
-            client_secret=self.client_secret,
-            scope=self.scope.split(" "),
-            redirect_uri=redirect_url,
-            authorization_endpoint=self.url_authorize,
-            token_endpoint=self.url_oauthtoken,
-        )
+        def new_oauth_session() -> OAuth2Session:
+            return OAuth2Session(
+                client_id=self.client_id,
+                client_secret=self.client_secret,
+                scope=self.scope.split(" "),
+                redirect_uri=redirect_url,
+                authorization_endpoint=self.url_authorize,
+                token_endpoint=self.url_oauthtoken,
+            )
+
+        # Shared session is only used to build authorization URLs; it must never hold a user token.
+        self.authlib = new_oauth_session()
 
         self.unauthorized_action = unauthorized_action
         self.callback_func = callback
@@ -238,7 +242,13 @@ class Oidc(Auth):
 
         @asgi_app.get('/' + urlstrip(self.callback_authorize))
         async def route_callback(request: Request):
-            self.authlib.fetch_token(url=self.url_oauthtoken, authorization_response=str(request.url))
+            # Each callback gets its own session so concurrent logins can't swap tokens across an await.
+            with new_oauth_session() as oauth:
+                oauth.fetch_token(url=self.url_oauthtoken, authorization_response=str(request.url))
+                userinfo = {}
+                if self.url_userinfo:
+                    userinfo = oauth.get(self.url_userinfo).json()
+
             try:
                 host_url_path = urlpath(self.host_url)
                 response = RedirectResponse(url=host_url_path)
@@ -247,10 +257,6 @@ class Oidc(Auth):
                 app_runner = writer.serve.app_runner(asgi_app)
                 await app_runner.init_session(InitSessionRequestPayload(
                     cookies=request.cookies, headers=request.headers, proposedSessionId=session_id))
-
-                userinfo = {}
-                if self.url_userinfo:
-                    userinfo = self.authlib.get(self.url_userinfo).json()
 
                 if self.callback_func:
                     self.callback_func(request, session_id, userinfo)
