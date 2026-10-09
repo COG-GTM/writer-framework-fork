@@ -4,15 +4,13 @@ import logging
 import os.path
 import time
 from abc import ABCMeta, abstractmethod
-from typing import Callable, Dict, Optional, Set
+from typing import Callable, Dict, Optional
 from urllib.parse import urlparse
 
 from authlib.integrations.requests_client.oauth2_session import OAuth2Session  # type: ignore
 from fastapi import Request, Response, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from starlette.requests import HTTPConnection
-from starlette.types import ASGIApp, Receive, Scope, Send
 
 import writer.serve
 from writer.core import session_manager
@@ -183,13 +181,24 @@ class Oidc(Auth):
     authlib: OAuth2Session = None
     callback_func: Optional[Callable[[Request, str, dict], None]] = None # Callback to validate user authentication
     unauthorized_action: Optional[Callable[[Request, Unauthorized], Response]] = None # Callback to build its own page when a user is not allowed
-    _authenticated_sessions: Set[str] = dataclasses.field(default_factory=set, init=False, repr=False)
+    session_cookie_max_age: int = 3600 # Lifetime in seconds of the session cookie issued after a successful login
+    _authenticated_sessions: Dict[str, float] = dataclasses.field(default_factory=dict, init=False, repr=False)
 
     def _is_authenticated_session(self, session_id: Optional[str]) -> bool:
         """
-        Only session ids issued by the OIDC callback after a successful login are accepted.
+        Only session ids issued by the OIDC callback after a successful login, and not expired, are accepted.
         """
-        return session_id is not None and session_id in self._authenticated_sessions
+        if session_id is None:
+            return False
+        issued_at = self._authenticated_sessions.get(session_id)
+        return issued_at is not None and time.time() - issued_at < self.session_cookie_max_age
+
+    def _add_authenticated_session(self, session_id: str) -> None:
+        now = time.time()
+        expired = [sid for sid, issued_at in self._authenticated_sessions.items() if now - issued_at >= self.session_cookie_max_age]
+        for sid in expired:
+            del self._authenticated_sessions[sid]
+        self._authenticated_sessions[session_id] = now
 
     def register(self,
                  asgi_app: WriterFastAPI,
@@ -231,8 +240,6 @@ class Oidc(Auth):
         self.unauthorized_action = unauthorized_action
         self.callback_func = callback
 
-        asgi_app.add_middleware(_OidcWebsocketGuard, is_authenticated=self._is_authenticated_session)
-
         @asgi_app.middleware("http")
         async def oidc_middleware(request: Request, call_next):
             session = request.cookies.get('session')
@@ -268,8 +275,8 @@ class Oidc(Auth):
                 if self.url_userinfo:
                     app_runner.set_userinfo(session_id=session_id, userinfo=userinfo)
 
-                self._authenticated_sessions.add(session_id)
-                response.set_cookie(key="session", value=session_id, httponly=True)
+                self._add_authenticated_session(session_id)
+                response.set_cookie(key="session", value=session_id, httponly=True, max_age=self.session_cookie_max_age)
                 return response
             except Unauthorized as exc:
                 if self.unauthorized_action is not None:
@@ -281,25 +288,6 @@ class Oidc(Auth):
                         "message": exc.message,
                         "more_info": exc.more_info
                     })
-
-
-class _OidcWebsocketGuard:
-    """
-    Rejects websocket connections (e.g. /api/stream) that do not carry a session cookie
-    issued by the OIDC callback. HTTP middlewares do not apply to websockets.
-    """
-    def __init__(self, app: ASGIApp, is_authenticated: Callable[[Optional[str]], bool]):
-        self.app = app
-        self.is_authenticated = is_authenticated
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send):
-        if scope["type"] == "websocket":
-            session_id = HTTPConnection(scope).cookies.get("session")
-            if not self.is_authenticated(session_id):
-                await send({"type": "websocket.close", "code": 1008})
-                return
-
-        await self.app(scope, receive, send)
 
 
 def Google(client_id: str, client_secret: str, host_url: str, app_static_public = False) -> Oidc:

@@ -61,10 +61,18 @@ class TestAuth:
         asgi_app: fastapi.FastAPI = writer.serve.get_asgi_app(test_oidcauth_dir, "run")
         with fastapi.testclient.TestClient(asgi_app) as client:
             client.cookies.set("session", FORGED_SESSION_ID)
-            with pytest.raises(WebSocketDisconnect) as exc:
-                with client.websocket_connect("/api/stream"):
-                    pass
-            assert exc.value.code == 1008
+            client.post("/api/init", json={"proposedSessionId": FORGED_SESSION_ID}, follow_redirects=False)
+            with client.websocket_connect("/api/stream") as websocket:
+                websocket.send_json({
+                    "type": "streamInit",
+                    "trackingId": 0,
+                    "payload": {
+                        "sessionId": FORGED_SESSION_ID
+                    }
+                })
+                with pytest.raises(WebSocketDisconnect) as exc:
+                    websocket.receive_json()
+                assert exc.value.code == 1008
 
     def test_oidc_should_accept_session_issued_by_callback(self):
         asgi_app: fastapi.FastAPI = writer.serve.get_asgi_app(test_oidcauth_dir, "run")
