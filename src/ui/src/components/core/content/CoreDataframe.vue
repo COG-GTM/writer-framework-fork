@@ -317,6 +317,7 @@ import injectionKeys from "@/injectionKeys";
 import type * as aq from "arquero";
 import type { Table } from "apache-arrow";
 import { dataUrlToBase64, base64ToArrayBuffer } from "@/utils/base64";
+import { dataframeToSafeCSV } from "./CoreDataframe/csv";
 
 /**
  * If the table is massive, only a certain amount of rows is rendered at a time,
@@ -574,8 +575,7 @@ async function loadData() {
 }
 
 async function download() {
-	const aq = await import("arquero");
-	const csv = table.value.select(aq.not(ARQUERO_INTERNAL_ID)).toCSV();
+	const csv = dataframeToSafeCSV(table.value);
 	const el = document.createElement("a");
 
 	const blob = new Blob([csv], { type: "text/csv" });
