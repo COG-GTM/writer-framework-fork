@@ -1908,6 +1908,81 @@ class EventHandler:
                 )
             raise e
 
+    def _validate_component_event_target(self, ev: WriterEvent) -> Component:
+        """
+        Resolves the component targeted by a component event and, in run mode,
+        rejects events the session couldn't have produced: the instance path must
+        follow the component tree from root, and every component in it must be
+        visible for the session's state.
+
+        Visibility is not an authorization mechanism; handlers that perform
+        privileged actions must still check authorization themselves.
+        """
+        instance_path = ev.instancePath
+        if not instance_path:
+            raise ValueError("Component event must specify an instance path.")
+        target_id = instance_path[-1].get("componentId")
+        target_component = self.session_component_tree.get_component(target_id)
+        if target_component is None:
+            raise ValueError(f'Component with id "{target_id}" not found.')
+        if Config.mode != "run":
+            return target_component
+
+        self._validate_instance_path(instance_path)
+        checked_depth = len(instance_path)
+        if self._is_active_timer_tick(ev, target_component):
+            checked_depth = min(checked_depth, 2)
+        for depth in range(1, checked_depth + 1):
+            if not self.evaluator.is_component_visible(instance_path[:depth]):
+                raise PermissionError(
+                    f"Event '{ev.type}' rejected: component is not visible."
+                )
+        return target_component
+
+    def _validate_instance_path(self, instance_path: InstancePath) -> None:
+        parent: Optional[Component] = None
+        for depth, item in enumerate(instance_path):
+            component_id = item.get("componentId")
+            instance_number = item.get("instanceNumber")
+            if (
+                not isinstance(instance_number, int)
+                or isinstance(instance_number, bool)
+                or instance_number < 0
+            ):
+                raise PermissionError("Invalid instance path.")
+            component = self.session_component_tree.get_component(component_id)
+            if component is None:
+                raise PermissionError("Invalid instance path.")
+            if parent is None:
+                if component.id != "root":
+                    raise PermissionError("Instance path must start at root.")
+            elif component.parentId != parent.id and not self._is_reused_by(
+                parent, component, instance_path[:depth]
+            ):
+                raise PermissionError("Invalid instance path.")
+            parent = component
+
+    def _is_reused_by(
+        self, reuse: Component, component: Component, reuse_instance_path: InstancePath
+    ) -> bool:
+        if reuse.type != "reuse":
+            return False
+        proxy_id = self.evaluator.evaluate_field(reuse_instance_path, "proxyId")
+        return proxy_id == component.id and proxy_id != reuse.id
+
+    def _is_active_timer_tick(self, ev: WriterEvent, target_component: Component) -> bool:
+        """
+        Hidden components stay mounted in the frontend, so an active timer on the
+        displayed page keeps ticking even when it or one of its containers is
+        hidden. Only root and page visibility apply to its ticks.
+        """
+        if target_component.type != "timer" or ev.type != "wf-tick":
+            return False
+        is_active = self.evaluator.evaluate_field(
+            cast(InstancePath, ev.instancePath), "isActive", False, "yes"
+        )
+        return is_active is True or is_active in ("yes", "true")
+
     def _handle_component_event(self, ev: WriterEvent):
         instance_path = ev.instancePath
         try:
@@ -1951,6 +2026,8 @@ class EventHandler:
         try:
             if not ev.isSafe and ev.handler is not None:
                 raise PermissionError("Unexpected handler set on event.")
+            if ev.instancePath:
+                self._validate_component_event_target(ev)
             self._deserialize(ev)
             if not ev.instancePath:
                 return {"ok": True, "result": self._handle_global_event(ev)}

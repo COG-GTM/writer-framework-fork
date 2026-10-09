@@ -130,6 +130,44 @@ class Evaluator:
 
         return context
 
+    def is_component_visible(self, instance_path: InstancePath) -> bool:
+        """
+        Mirrors the frontend's isComponentVisible for the last component of the
+        instance path, evaluating custom bindings against the session state.
+        """
+        component_id = instance_path[-1]["componentId"]
+        component = self.component_tree.get_component(component_id)
+        if not component:
+            return False
+        visible = component.visible
+        if visible is None:
+            return True
+        expression = visible.get("expression")
+        if expression is True:
+            return True
+        if expression is False:
+            return False
+
+        accessors = self.parse_expression(visible.get("binding", ""), instance_path, {})
+        if accessors and accessors[0] == "vault":
+            # The frontend masks vault values with a non-empty placeholder
+            value: Any = "********"
+        else:
+            context = self.get_context_data(instance_path, {})
+            value = self._apply_accessors(accessors, self.state.user_state, context)
+        is_truthy = self._is_js_truthy(value)
+        return not is_truthy if visible.get("reversed") is True else is_truthy
+
+    @staticmethod
+    def _is_js_truthy(value: Any) -> bool:
+        if value is None or isinstance(value, bool):
+            return bool(value)
+        if isinstance(value, (int, float)):
+            return value == value and value != 0
+        if isinstance(value, str):
+            return value != ""
+        return True
+
     def set_state(
         self, expr: str, instance_path: InstancePath, value: Any, base_context={}
     ) -> None:
