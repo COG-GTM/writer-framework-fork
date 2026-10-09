@@ -63,6 +63,23 @@ async def test_parse_pdf_by_file_id_error(session, runner):
 
 
 @pytest.mark.asyncio
+async def test_parse_pdf_by_file_id_accepts_urn_uuid(session, runner):
+    file_id = "3f2b1c9e-8d4a-4b6f-9e21-7a5c0d8e1f42"
+
+    with patch("writer.ai.WriterAIManager.acquire_client") as mock_client:
+        mock_client.return_value.tools.parse_pdf.return_value = MagicMock(content="ok")
+
+        component = session.add_fake_component({})
+        block = WriterParsePDFByFileID(component, runner, {})
+        block._get_field = lambda name, *args, **kwargs: f"URN:UUID:{file_id}" if name == "file" else "yes"
+
+        block.run()
+
+        mock_client.return_value.tools.parse_pdf.assert_called_once_with(file_id, format="markdown")
+        assert block.outcome == "success"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "file_id",
     [
@@ -74,6 +91,8 @@ async def test_parse_pdf_by_file_id_error(session, runner):
         "{3f2b1c9e-8d4a-4b6f-9e21-7a5c0d8e1f42}",
         "3f2b1c9e8d4a4b6f9e217a5c0d8e1f42",
         "file-uuid-456",
+        "urn:uuid:3f2b1c9e-8d4a-4b6f-9e21-7a5c0d8e1f42/../files",
+        "urn:3f2b1c9e-8d4a-4b6f-9e21-7a5c0d8e1f42",
         {"id": "3f2b1c9e-8d4a-4b6f-9e21-7a5c0d8e1f42"},
     ],
 )
