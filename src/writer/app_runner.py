@@ -32,6 +32,7 @@ from writer.core import (
     use_request_context,
 )
 from writer.core_ui import ingest_bmc_component_tree
+from writer.keyvalue_storage import resolve_tenant_ids
 from writer.logs import use_logging_redirect, use_stdout_redirect
 from writer.ss_types import (
     AppProcessServerRequest,
@@ -186,8 +187,7 @@ class AppProcess(multiprocessing.Process):
 
         headers = session.headers or {}
         writer_application: Optional[WriterApplicationInformation] = None
-        writer_app_id = headers.get("x-agent-id") or os.getenv("WRITER_APP_ID")
-        writer_org_id = headers.get("x-organization-id") or os.getenv("WRITER_ORG_ID")
+        writer_app_id, writer_org_id = resolve_tenant_ids(headers)
         writer_base_url = os.getenv("WRITER_BASE_URL", "https://api.writer.com")
         is_org_admin_header = headers.get("x-is-org-admin", "").lower()
         is_org_admin = is_org_admin_header == "true"
