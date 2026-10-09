@@ -165,6 +165,40 @@ class TestServe:
                 assert received == {1, 2, 3}
                 websocket.close(1000)
 
+    def test_rate_limit_applies_before_stream_init(self, monkeypatch) -> None:
+        calls = []
+        original_acquire = writer.serve._TokenBucket.acquire
+
+        async def counting_acquire(self) -> None:
+            calls.append(1)
+            await original_acquire(self)
+
+        monkeypatch.setattr(writer.serve._TokenBucket, "acquire", counting_acquire)
+        asgi_app: fastapi.FastAPI = writer.serve.get_asgi_app(test_app_dir, "run")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            session_id = self._init_stream(client)["sessionId"]
+            with client.websocket_connect("/api/stream") as websocket:
+                for tracking_id in range(3):
+                    websocket.send_json({
+                        "type": "keepAlive",
+                        "trackingId": tracking_id,
+                        "payload": {}
+                    })
+                websocket.send_json({
+                    "type": "streamInit",
+                    "trackingId": 3,
+                    "payload": {"sessionId": session_id}
+                })
+                websocket.send_json({
+                    "type": "stateEnquiry",
+                    "trackingId": 4,
+                    "payload": {}
+                })
+                message = json.loads(websocket.receive_bytes().decode())
+                assert message["trackingId"] == 4
+                websocket.close(1000)
+        assert len(calls) >= 5
+
     def test_token_bucket_throttles_after_burst(self) -> None:
         async def run() -> float:
             bucket = writer.serve._TokenBucket(rate=20, burst=2)

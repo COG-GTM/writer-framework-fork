@@ -736,7 +736,7 @@ def get_asgi_app(
             raise WebsocketMessageTooBig()
         return json.loads(data)
 
-    async def _stream_session_init(websocket: WebSocket):
+    async def _stream_session_init(websocket: WebSocket, rate_limiter: _TokenBucket):
         """
         Waits for the client to provide a session id to initialise the stream.
         Returns the session id received.
@@ -745,6 +745,7 @@ def get_asgi_app(
         session_id = None
         while session_id is None:
             req_message_raw = await _receive_json(websocket)
+            await rate_limiter.acquire()
 
             try:
                 req_message = WriterWebsocketIncoming.model_validate(req_message_raw)
@@ -756,7 +757,9 @@ def get_asgi_app(
                 session_id = req_message.payload.get("sessionId")
         return session_id
 
-    async def _stream_incoming_requests(websocket: WebSocket, session_id: str):
+    async def _stream_incoming_requests(
+        websocket: WebSocket, session_id: str, rate_limiter: _TokenBucket
+    ):
         """
         Handles incoming requests from client.
 
@@ -765,7 +768,6 @@ def get_asgi_app(
         until a handler finishes.
         """
 
-        rate_limiter = _TokenBucket(WEBSOCKET_RATE_LIMIT_PER_SECOND, WEBSOCKET_RATE_LIMIT_BURST)
         inflight = asyncio.Semaphore(MAX_WEBSOCKET_INFLIGHT_TASKS)
 
         try:
@@ -995,8 +997,9 @@ def get_asgi_app(
             await websocket.close(code=1008)
             return
 
+        rate_limiter = _TokenBucket(WEBSOCKET_RATE_LIMIT_PER_SECOND, WEBSOCKET_RATE_LIMIT_BURST)
         try:
-            session_id = await _stream_session_init(websocket)
+            session_id = await _stream_session_init(websocket, rate_limiter)
         except WebSocketDisconnect:
             return
         except WebsocketMessageTooBig:
@@ -1019,7 +1022,7 @@ def get_asgi_app(
         except (WebSocketDisconnect, RuntimeError):
             return
 
-        task1 = asyncio.create_task(_stream_incoming_requests(websocket, session_id))
+        task1 = asyncio.create_task(_stream_incoming_requests(websocket, session_id, rate_limiter))
         task2 = asyncio.create_task(_stream_outgoing_announcements(websocket, session_id))
 
         try:

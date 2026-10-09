@@ -329,6 +329,7 @@ export default {
 </script>
 <script setup lang="ts">
 import {
+	exceedsWebsocketLimit,
 	getMaxEncodedFilesSize,
 	useFilesEncoder,
 } from "@/composables/useFilesEncoder/useFilesEncoder";
@@ -409,8 +410,6 @@ function handleMessageSent(e?: KeyboardEvent | MouseEvent) {
 	const trimmedMessage = outgoingMessage.value?.trim();
 	if (!trimmedMessage && pastedImages.value.length === 0) return;
 
-	messageIndexLoading.value = messages.value.length + 1;
-
 	// Create payload based on whether we have images or just text
 	type MessagePayload = {
 		role: string;
@@ -452,6 +451,13 @@ function handleMessageSent(e?: KeyboardEvent | MouseEvent) {
 			content: trimmedMessage!,
 		};
 	}
+
+	if (exceedsWebsocketLimit(payload, wf.maxWebsocketMessageSize?.value)) {
+		showError("Message is too big to send. Try fewer or smaller images.");
+		return;
+	}
+
+	messageIndexLoading.value = messages.value.length + 1;
 
 	const event = new CustomEvent("wf-chatbot-message", {
 		detail: {
@@ -753,6 +759,12 @@ async function handleUploadFiles() {
 	const { encodedFiles } = await encodeFiles();
 
 	if (encodedFiles.length === 0) {
+		isUploadingFiles.value = false;
+		return;
+	}
+
+	if (exceedsWebsocketLimit(encodedFiles, wf.maxWebsocketMessageSize?.value)) {
+		showError("Files are too big to upload together. Try fewer or smaller files.");
 		isUploadingFiles.value = false;
 		return;
 	}

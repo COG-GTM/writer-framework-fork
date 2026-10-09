@@ -962,6 +962,7 @@ export function generateCore() {
 			incrementMetric(METRIC_NAMES.FRONTEND_MESSAGE_ERROR, {
 				tags: { type, mode: mode.value || "unknown" },
 			});
+			frontendMessageMap.value.delete(trackingId);
 			callback?.({ ok: false });
 		}
 	}

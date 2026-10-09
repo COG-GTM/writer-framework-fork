@@ -97,6 +97,7 @@ import prettyBytes from "pretty-bytes";
 import injectionKeys from "@/injectionKeys";
 import { useFormValueBroker } from "@/renderer/useFormValueBroker";
 import {
+	exceedsWebsocketLimit,
 	getMaxEncodedFilesSize,
 	useFilesEncoder,
 } from "@/composables/useFilesEncoder/useFilesEncoder";
@@ -157,6 +158,13 @@ async function handleUploadFiles(files: File[]) {
 	const { encodedFiles } = await encodeFiles();
 
 	if (encodedFiles.length === 0) {
+		isUploading.value = false;
+		return;
+	}
+
+	if (exceedsWebsocketLimit(encodedFiles, wf.maxWebsocketMessageSize?.value)) {
+		uploadingErrorMessage.value =
+			"Files are too big to upload together. Try fewer or smaller files.";
 		isUploading.value = false;
 		return;
 	}

@@ -59,6 +59,22 @@ export function getMaxEncodedFilesSize(
 	return Math.min(fallback, Math.floor((available * 3) / 4));
 }
 
+// Room for the event envelope around a payload (type, tracking id, instance path).
+const WEBSOCKET_EVENT_RESERVE_BYTES = 16 * 1024;
+
+/**
+ * Whether `payload`, once wrapped in an event message, would exceed the
+ * server's websocket limit.
+ */
+export function exceedsWebsocketLimit(
+	payload: unknown,
+	maxWebsocketMessageSize: number | null | undefined,
+): boolean {
+	if (!maxWebsocketMessageSize) return false;
+	const size = new Blob([JSON.stringify(payload)]).size;
+	return size + WEBSOCKET_EVENT_RESERVE_BYTES > maxWebsocketMessageSize;
+}
+
 export type UseFilesEncoderParams = {
 	multiple: MaybeRef<boolean>;
 };
