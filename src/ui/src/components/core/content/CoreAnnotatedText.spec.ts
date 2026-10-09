@@ -7,6 +7,7 @@ import { buildMockCore, mockProvides } from "@/tests/mocks";
 import { flushPromises, mount } from "@vue/test-utils";
 import { ref } from "vue";
 import { WdsColor } from "@/wds/tokens";
+import { VUE_DOMPURIFY_HTML_OPTIONS } from "@/utils/sanitizeHtml";
 
 describe("CoreAnnotatedText", async () => {
 	const text = [
@@ -25,7 +26,7 @@ describe("CoreAnnotatedText", async () => {
 
 		const wrapper = mount(CoreAnnotatedText, {
 			global: {
-				plugins: [VueDOMPurifyHTML],
+				plugins: [[VueDOMPurifyHTML, VUE_DOMPURIFY_HTML_OPTIONS]],
 				provide: {
 					...mockProvides,
 					[injectionKeys.core as symbol]: core,
@@ -65,7 +66,7 @@ describe("CoreAnnotatedText", async () => {
 
 		const wrapper = mount(CoreAnnotatedText, {
 			global: {
-				plugins: [VueDOMPurifyHTML],
+				plugins: [[VueDOMPurifyHTML, VUE_DOMPURIFY_HTML_OPTIONS]],
 				provide: {
 					...mockProvides,
 					[injectionKeys.core as symbol]: core,
