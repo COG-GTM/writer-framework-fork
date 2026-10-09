@@ -1572,7 +1572,7 @@ class EventDeserialiser:
         if is_base64:
             if len(encoded) > (max_size // 3 + 1) * 4:
                 raise ValueError("Data URL exceeds maximum size.")
-            decoded = base64.b64decode(encoded, validate=True)
+            decoded = base64.b64decode(urllib.parse.unquote(encoded), validate=True)
         else:
             if len(encoded) > max_size * 3:
                 raise ValueError("Data URL exceeds maximum size.")
@@ -1598,7 +1598,14 @@ class EventDeserialiser:
         payload = ev.payload
         if not isinstance(payload, list):
             raise ValueError("File change payload must be a list.")
-        tf_payload = list(map(self._file_item_transform, payload))
+        tf_payload = []
+        total_size = 0
+        for file_item in payload:
+            tf_item = self._file_item_transform(file_item)
+            total_size += len(tf_item["data"])
+            if total_size > self.MAX_DATA_URL_DECODED_SIZE:
+                raise ValueError("Total file size exceeds maximum size.")
+            tf_payload.append(tf_item)
 
         return tf_payload
 
