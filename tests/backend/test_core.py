@@ -866,6 +866,72 @@ class TestEventDeserialiser:
         assert ev.payload[0].get("type") == "text/plain"
         assert bytes(ev.payload[0].get("data")).decode("utf-8") == "hello world"
 
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "file:///etc/passwd",
+            "http://169.254.169.254/latest/meta-data/",
+            "https://example.com/",
+            "ftp://example.com/file",
+            "/etc/passwd",
+            "data:text/plain;base64",
+            "data:text/plain;base64,not*valid*base64",
+        ],
+    )
+    def test_webcam_rejects_non_data_urls(self, url) -> None:
+        ev = WriterEvent(type="wf-webcam", instancePath=self.root_instance_path, payload=url)
+        with pytest.raises(RuntimeError):
+            self.ed.transform(ev)
+        assert ev.payload == {}
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "file:///proc/self/environ",
+            "http://127.0.0.1/",
+            "ftp://example.com/file",
+        ],
+    )
+    def test_file_change_rejects_non_data_urls(self, url) -> None:
+        ev = WriterEvent(
+            type="wf-file-change",
+            instancePath=self.root_instance_path,
+            payload=[{"name": "x", "type": "text/plain", "data": url}],
+        )
+        with pytest.raises(RuntimeError):
+            self.ed.transform(ev)
+        assert ev.payload == {}
+
+    def test_file_change_non_base64_data_url(self) -> None:
+        ev = WriterEvent(
+            type="wf-file-change",
+            instancePath=self.root_instance_path,
+            payload=[{"name": "a.txt", "type": "text/plain", "data": "data:,hello%20world"}],
+        )
+        self.ed.transform(ev)
+        assert ev.payload[0].get("data") == b"hello world"
+
+    def test_webcam_percent_encoded_base64(self) -> None:
+        ev = WriterEvent(
+            type="wf-webcam",
+            instancePath=self.root_instance_path,
+            payload="data:text/plain;base64,SGVsbG8%3D",
+        )
+        self.ed.transform(ev)
+        assert ev.payload == b"Hello"
+
+    def test_file_change_total_size_limit(self, monkeypatch) -> None:
+        monkeypatch.setattr(EventDeserialiser, "MAX_DATA_URL_DECODED_SIZE", 15)
+        item = {"name": "a.txt", "type": "text/plain", "data": "data:,0123456789"}
+        ev = WriterEvent(
+            type="wf-file-change",
+            instancePath=self.root_instance_path,
+            payload=[item, item],
+        )
+        with pytest.raises(RuntimeError):
+            self.ed.transform(ev)
+        assert ev.payload == {}
+
     def test_date_change(self) -> None:
         ev_invalid = WriterEvent(
             type="wf-date-change", instancePath=self.root_instance_path, payload="virus"
