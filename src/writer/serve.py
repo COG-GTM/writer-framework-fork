@@ -34,7 +34,7 @@ from urllib.parse import urlsplit
 
 import orjson
 import uvicorn
-from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi import APIRouter, Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.routing import Mount
 from fastapi.staticfiles import StaticFiles
@@ -191,12 +191,42 @@ def get_asgi_app(
     def _check_origin_header(origin_header: Optional[str]) -> bool:
         if serve_mode not in ("edit") or enable_remote_edit is True:
             return True
-        if origin_header is None:
-            return False
-        hostname = urlsplit(origin_header).hostname
-        if hostname in ("127.0.0.1", "localhost"):
-            return True
-        return False
+        return _is_local_host(origin_header)
+
+    def _verify_edit_request(request: Request) -> None:
+        """
+        Guards edit-only HTTP routes against cross-site requests (CSRF) and DNS rebinding.
+        """
+        if serve_mode != "edit":
+            raise HTTPException(status_code=403, detail={"summary": "Invalid mode. Expected 'edit'"})
+        if enable_remote_edit is True:
+            return
+
+        host_header = request.headers.get("host")
+        origin_header = request.headers.get("origin")
+        fetch_site = request.headers.get("sec-fetch-site")
+
+        if not _is_local_host(host_header):
+            is_allowed = False
+        elif origin_header is not None:
+            is_allowed = _is_local_host(origin_header)
+        else:
+            # Browsers omit Origin on same-origin GET requests
+            is_allowed = request.method in ("GET", "HEAD") and fetch_site in (None, "same-origin", "none")
+
+        if not is_allowed:
+            logging.error(
+                "An edit request to %s with host %s and origin %s was rejected. For security reasons, only local "
+                "requests are allowed in edit mode. To circumvent this protection, use the --enable-remote-edit flag "
+                "if running via command line.",
+                request.url.path, host_header, origin_header
+            )
+            raise HTTPException(
+                status_code=403,
+                detail={"summary": "Incorrect origin. Only local origins are allowed in edit mode."}
+            )
+
+    edit_router = APIRouter(dependencies=[Depends(_verify_edit_request)])
 
     # Init
 
@@ -254,10 +284,8 @@ def get_asgi_app(
         
         return {"status": "ok"}
 
-    @app.get("/api/export")
+    @edit_router.get("/api/export")
     async def export_zip():
-        if serve_mode != "edit":
-            raise HTTPException(status_code=403, detail="Invalid mode.")
         exported_zip_stream = app_runner.export_zip()
         return StreamingResponse(
             exported_zip_stream,
@@ -267,10 +295,8 @@ def get_asgi_app(
             }
         )
 
-    @app.post("/api/import")
+    @edit_router.post("/api/import")
     async def import_zip(file: UploadFile = File(...)):
-        if serve_mode != "edit":
-            raise HTTPException(status_code=403, detail={"summary": "Invalid mode. Expected 'edit'"})
         if not file.filename or not file.filename.endswith(".zip"):
             raise HTTPException(status_code=400, detail={"summary": "Only .zip files are supported."})
 
@@ -293,7 +319,7 @@ def get_asgi_app(
         except ValueError as e:
             raise HTTPException(status_code=400, detail={"summary": "Invalid archive contents", "details": traceback.format_exc()}) from e
 
-    @app.post("/api/autogen")
+    @edit_router.post("/api/autogen")
     async def autogen(requestBody: AutogenRequestBody, request: Request):
         import writer.autogen
         agent_token_header = request.headers.get('x-agent-token')
@@ -303,7 +329,7 @@ def get_asgi_app(
             agent_token_header
             )
 
-    @app.post("/api/data/retrieve")
+    @edit_router.post("/api/data/retrieve")
     async def retrieve_data(requestBody: RetrieveDataRequestBody) -> RetrieveDataResponseBody:
         from writer.keyvalue_storage import writer_kv_storage
 
@@ -324,7 +350,7 @@ def get_asgi_app(
 
         return RetrieveDataResponseBody(result={k: v["data"] for k, v in kv_pairs})
 
-    @app.post("/api/data/delete")
+    @edit_router.post("/api/data/delete")
     async def delete_data(requestBody: DeleteDataRequestBody) -> None:
         from writer.keyvalue_storage import writer_kv_storage
 
@@ -334,6 +360,8 @@ def get_asgi_app(
         await asyncio.gather(*(delete_key(key) for key in requestBody.keys))
 
         return None
+
+    app.include_router(edit_router)
 
     @app.post("/api/init")
     async def init(
@@ -1004,6 +1032,19 @@ def print_init_message():
 
 
 WRITER FRAMEWORK v{VERSION}""")
+
+
+def _is_local_host(value: Optional[str]) -> bool:
+    """
+    Checks whether an Origin (scheme://host:port) or Host (host:port) header points to the local machine.
+    """
+    if not value:
+        return False
+    try:
+        hostname = urlsplit(value if "//" in value else f"//{value}").hostname
+    except ValueError:
+        return False
+    return hostname in ("127.0.0.1", "localhost", "::1")
 
 
 def print_route_message(run_name: str, port: int, host: str):
