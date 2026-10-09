@@ -5,8 +5,9 @@ from typing import Any
 
 from writer.abstract import register_abstract_template
 from writer.blocks.base_block import BlueprintBlock
+from writer.evaluator import Evaluator
 from writer.logs import use_logging_redirect, use_stdout_redirect
-from writer.ss_types import AbstractTemplate
+from writer.ss_types import AbstractTemplate, WriterConfigurationError
 
 exec_logger = logging.getLogger("exec_logger")
 
@@ -22,6 +23,9 @@ logger # logging.Logger object for capturing logs
 
 # To set the output of this block, which will be available via result to the next block:
 set_output("a sample result")
+
+# Template expressions such as @{my_var} are not expanded in Python code.
+# Read values from state, payload, result or results instead.
 
 """
 
@@ -43,7 +47,7 @@ class CodeBlock(BlueprintBlock):
                             "name": "Code",
                             "type": "Code",
                             "control": "Textarea",
-                            "desc": "The code to be executed.",
+                            "desc": "The code to be executed. Template expressions (@{...}) are not expanded; read values from state, payload, result or results instead.",
                             "init": INIT_CODE,
                         },
                     },
@@ -66,9 +70,26 @@ class CodeBlock(BlueprintBlock):
     def set_output(self, output: Any):
         self.result = output
 
+    def _get_code(self) -> str:
+        # The code is executed as-is. Expanding @{...} templates here would
+        # splice state, payloads and block results into the source and allow
+        # code injection.
+        code = self.component.content.get("code") or ""
+        try:
+            compile(code, f"<code block {self.component.id}>", "exec")
+        except SyntaxError as e:
+            if Evaluator.TEMPLATE_REGEX.search(code):
+                raise WriterConfigurationError(
+                    "Template expressions (@{...}) are not supported in Python code blocks. "
+                    "Read values from `state`, `payload`, `result` or `results` instead, "
+                    'e.g. state["my_var"].'
+                ) from e
+            raise
+        return code
+
     def run(self):
         try:
-            code = self._get_field("code")
+            code = self._get_code()
             self.result = None
 
             writeruserapp = sys.modules.get("writeruserapp")

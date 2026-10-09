@@ -141,6 +141,7 @@ def _get_tools():
                     All property or index access is via dots, for example @{my_arr.0.subprop} or @{my_obj.subprop}
                     To get the result of the latest block, use @{result}, this will fetch the value from the execution environment, which is combined with state during runtime.
                     To access the result of a block that's not the latest use @{results.[id]} for example @{results.aig1}
+                    Never use @{...} inside the "code" field of a blueprints_code block, it isn't expanded there. In Python code, read values from the globals state, payload, result and results instead, for example state["my_var"] or results["aig1"].
                     All nodes must be connected to each other via "outs", either by being the source or destination of an out.
                     No circular references are allowed.
                     The system has built-in mechanisms to announce errors, success, so don't add anything for that.
