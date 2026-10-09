@@ -159,6 +159,15 @@ class Evaluator:
         return not is_truthy if visible.get("reversed") is True else is_truthy
 
     @staticmethod
+    def _to_js_string(value: Any) -> str:
+        """Converts a bracket accessor key the way the frontend's String() does."""
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        if value is None:
+            return "null"
+        return str(value)
+
+    @staticmethod
     def _is_js_truthy(value: Any) -> bool:
         if value is None or isinstance(value, bool):
             return bool(value)
@@ -226,7 +235,9 @@ class Evaluator:
             elif character == "]":
                 level -= 1
                 if level == 0:
-                    s = str(self.evaluate_expression(s, instance_path, base_context))
+                    s = self._to_js_string(
+                        self.evaluate_expression(s, instance_path, base_context)
+                    )
                 else:
                     s += character
             else:

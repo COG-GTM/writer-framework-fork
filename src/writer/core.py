@@ -1960,6 +1960,10 @@ class EventHandler:
                 parent, component, instance_path[:depth]
             ):
                 raise PermissionError("Invalid instance path.")
+            elif parent.type == "repeater" and instance_number >= self._count_repeater_items(
+                instance_path[:depth]
+            ):
+                raise PermissionError("Invalid instance path.")
             parent = component
 
     def _is_reused_by(
@@ -1969,6 +1973,14 @@ class EventHandler:
             return False
         proxy_id = self.evaluator.evaluate_field(reuse_instance_path, "proxyId")
         return proxy_id == component.id and proxy_id != reuse.id
+
+    def _count_repeater_items(self, repeater_instance_path: InstancePath) -> int:
+        repeater_object = self.evaluator.evaluate_field(
+            repeater_instance_path, "repeaterObject", True, "{}"
+        )
+        if isinstance(repeater_object, (dict, list)):
+            return len(repeater_object)
+        return 0
 
     def _is_active_timer_tick(self, ev: WriterEvent, target_component: Component) -> bool:
         """

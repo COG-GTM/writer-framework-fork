@@ -78,6 +78,13 @@ def _components():
             visible=_custom("row.enabled"),
         ),
         Component(
+            id="row_plain_btn",
+            parentId="repeater1",
+            type="button",
+            binding=_click_binding(),
+        ),
+        Component(id="flag_btn", parentId="page1", type="button", binding=_click_binding()),
+        Component(
             id="active_timer",
             parentId="hidden_section",
             type="timer",
@@ -197,6 +204,24 @@ def test_out_of_range_repeater_instance_is_rejected(session):
         session,
         _path("root", "page1", "repeater1", "row_btn", instance_numbers=[0, 0, 0, 5]),
     )
+
+
+def test_out_of_range_repeater_instance_without_context_visibility_is_rejected(session):
+    _assert_rejected(
+        session,
+        _path("root", "page1", "repeater1", "row_plain_btn", instance_numbers=[0, 0, 0, 2]),
+    )
+    _assert_accepted(
+        session,
+        _path("root", "page1", "repeater1", "row_plain_btn", instance_numbers=[0, 0, 0, 1]),
+    )
+
+
+def test_boolean_bracket_key_uses_frontend_string_conversion(session):
+    session.session_state["enabled"] = True
+    session.session_state["flags"] = {"true": True}
+    session.session_component_tree.get_component("flag_btn").visible = _custom("flags[enabled]")
+    _assert_accepted(session, _path("root", "page1", "flag_btn"))
 
 
 def test_active_timer_ticks_while_hidden(session):
