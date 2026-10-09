@@ -303,8 +303,17 @@ def get_asgi_app(
             agent_token_header
             )
 
+    def _ensure_data_access_allowed(request: Request) -> None:
+        if serve_mode != "edit":
+            raise HTTPException(status_code=403, detail="Invalid mode.")
+        if not _check_origin_header(request.headers.get("origin")):
+            raise HTTPException(
+                status_code=403, detail="Incorrect origin. Only local origins are allowed."
+            )
+
     @app.post("/api/data/retrieve")
-    async def retrieve_data(requestBody: RetrieveDataRequestBody) -> RetrieveDataResponseBody:
+    async def retrieve_data(requestBody: RetrieveDataRequestBody, request: Request) -> RetrieveDataResponseBody:
+        _ensure_data_access_allowed(request)
         from writer.keyvalue_storage import writer_kv_storage
 
         all_keys = writer_kv_storage.get_data_keys()
@@ -325,7 +334,8 @@ def get_asgi_app(
         return RetrieveDataResponseBody(result={k: v["data"] for k, v in kv_pairs})
 
     @app.post("/api/data/delete")
-    async def delete_data(requestBody: DeleteDataRequestBody) -> None:
+    async def delete_data(requestBody: DeleteDataRequestBody, request: Request) -> None:
+        _ensure_data_access_allowed(request)
         from writer.keyvalue_storage import writer_kv_storage
 
         async def delete_key(key: str):
