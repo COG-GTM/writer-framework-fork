@@ -2,6 +2,7 @@ import json
 
 from writer.abstract import register_abstract_template
 from writer.blocks.base_block import BlueprintBlock
+from writer.blocks.redaction import redact_headers, redact_text
 from writer.ss_types import AbstractTemplate
 
 
@@ -108,13 +109,16 @@ class HTTPRequest(BlueprintBlock):
                 content_type = res.headers.get("Content-Type", "")
                 is_response_json = "application/json" in content_type
 
+                secrets = self._get_secret_values()
                 self.result = {
                     "request": {
-                        "url": str(res.request.url),
-                        "headers": dict(res.request.headers),
-                        "body": res.request.content.decode("utf-8", errors="replace"),
+                        "url": redact_text(str(res.request.url), secrets),
+                        "headers": redact_headers(res.request.headers, secrets),
+                        "body": redact_text(
+                            res.request.content.decode("utf-8", errors="replace"), secrets
+                        ),
                     },
-                    "headers": dict(res.headers),
+                    "headers": redact_headers(res.headers, secrets),
                     "status_code": res.status_code,
                     "body": res.json() if is_response_json else res.text,
                 }
