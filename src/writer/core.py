@@ -16,7 +16,7 @@ import secrets
 import time
 import traceback
 import typing
-import urllib.request
+import urllib.parse
 from contextvars import ContextVar
 from multiprocessing.process import BaseProcess
 from types import ModuleType
@@ -1552,8 +1552,37 @@ class EventDeserialiser:
     def _transform_number_change_finish(self, ev) -> Optional[float]:
         return self._transform_number_change(ev)
 
+    MAX_DATA_URL_DECODED_SIZE = 200 * 1024 * 1024
+
+    def _decode_data_url(self, data_url: Any) -> bytes:
+        """
+        Strictly decodes a client-supplied data URL (RFC 2397) without
+        performing any network or filesystem access.
+        """
+
+        if not isinstance(data_url, str):
+            raise ValueError("Data URL must be a string.")
+        if data_url[:5].lower() != "data:":
+            raise ValueError("Only data URLs are accepted.")
+        header, sep, encoded = data_url[5:].partition(",")
+        if not sep:
+            raise ValueError("Malformed data URL.")
+        is_base64 = header.lower().endswith(";base64")
+        max_size = self.MAX_DATA_URL_DECODED_SIZE
+        if is_base64:
+            if len(encoded) > (max_size // 3 + 1) * 4:
+                raise ValueError("Data URL exceeds maximum size.")
+            decoded = base64.b64decode(encoded, validate=True)
+        else:
+            if len(encoded) > max_size * 3:
+                raise ValueError("Data URL exceeds maximum size.")
+            decoded = urllib.parse.unquote_to_bytes(encoded)
+        if len(decoded) > max_size:
+            raise ValueError("Data URL exceeds maximum size.")
+        return decoded
+
     def _transform_webcam(self, ev) -> Any:
-        return urllib.request.urlopen(ev.payload).read()
+        return self._decode_data_url(ev.payload)
 
     def _file_item_transform(self, file_item: WriterFileItem) -> Dict:
         data = file_item.get("data")
@@ -1562,11 +1591,13 @@ class EventDeserialiser:
         return {
             "name": file_item.get("name"),
             "type": file_item.get("type"),
-            "data": urllib.request.urlopen(data).read(),
+            "data": self._decode_data_url(data),
         }
 
     def _transform_file_change(self, ev) -> List[Dict]:
         payload = ev.payload
+        if not isinstance(payload, list):
+            raise ValueError("File change payload must be a list.")
         tf_payload = list(map(self._file_item_transform, payload))
 
         return tf_payload
