@@ -151,20 +151,21 @@ class TestOidcLoginState:
         client, _ = _oidc_client()
         with client:
             res, query = _start_login(client)
+            state = query["state"][0]
 
             assert res.headers["location"].startswith("https://idp.example.com/authorize")
-            assert query["state"] == [res.cookies["oidc_state"]]
             assert query["code_challenge_method"] == ["S256"]
-            assert query["code_challenge"] == [create_s256_code_challenge(res.cookies["oidc_code_verifier"])]
+            assert query["code_challenge"] == [create_s256_code_challenge(res.cookies[f"oidc_login_{state}"])]
 
             login_cookies = [c for c in res.headers.get_list("set-cookie") if c.startswith("oidc_")]
-            assert len(login_cookies) == 2
-            for cookie in login_cookies:
-                assert "HttpOnly" in cookie
-                assert "Secure" in cookie
-                assert "SameSite=lax" in cookie
-                assert "Path=/authorize" in cookie
-                assert "Max-Age=600" in cookie
+            assert len(login_cookies) == 1
+            cookie = login_cookies[0]
+            assert cookie.startswith(f"oidc_login_{state}=")
+            assert "HttpOnly" in cookie
+            assert "Secure" in cookie
+            assert "SameSite=lax" in cookie
+            assert "Path=/authorize" in cookie
+            assert "Max-Age=600" in cookie
 
     def test_each_login_should_get_a_fresh_state(self):
         client, _ = _oidc_client()
@@ -177,9 +178,10 @@ class TestOidcLoginState:
         client, asgi_app = _oidc_client()
         with client:
             res, query = _start_login(client)
-            code_verifier = res.cookies["oidc_code_verifier"]
+            state = query["state"][0]
+            code_verifier = res.cookies[f"oidc_login_{state}"]
 
-            res = client.get(f"/authorize?code=abc&state={query['state'][0]}", follow_redirects=False)
+            res = client.get(f"/authorize?code=abc&state={state}", follow_redirects=False)
 
             assert res.status_code == 307
             assert res.headers["location"] == "/"
@@ -187,8 +189,30 @@ class TestOidcLoginState:
             assert asgi_app.state.app_runner.userinfos[session_id] == {"email": "user@example.com"}
             assert idp.token_requests[0]["code"] == "abc"
             assert idp.token_requests[0]["code_verifier"] == code_verifier
-            assert "oidc_state" not in client.cookies
-            assert "oidc_code_verifier" not in client.cookies
+            assert f"oidc_login_{state}" not in client.cookies
+
+    def test_parallel_logins_should_each_complete(self, idp):
+        """
+        Two tabs starting a login must not invalidate each other's pending sign-in.
+        """
+        client, _ = _oidc_client()
+        with client:
+            res_a, query_a = _start_login(client)
+            res_b, query_b = _start_login(client)
+            state_a, state_b = query_a["state"][0], query_b["state"][0]
+            verifier_a = res_a.cookies[f"oidc_login_{state_a}"]
+            verifier_b = res_b.cookies[f"oidc_login_{state_b}"]
+
+            res = client.get(f"/authorize?code=code-a&state={state_a}", follow_redirects=False)
+            assert res.status_code == 307
+            assert idp.token_requests[-1]["code_verifier"] == verifier_a
+            assert f"oidc_login_{state_a}" not in client.cookies
+            assert f"oidc_login_{state_b}" in client.cookies
+
+            client.cookies.delete("session")
+            res = client.get(f"/authorize?code=code-b&state={state_b}", follow_redirects=False)
+            assert res.status_code == 307
+            assert idp.token_requests[-1]["code_verifier"] == verifier_b
 
     def test_callback_should_reject_code_without_login_state_cookie(self, idp):
         """
@@ -205,14 +229,15 @@ class TestOidcLoginState:
     def test_callback_should_reject_mismatching_state(self, idp):
         client, _ = _oidc_client()
         with client:
-            _start_login(client)
+            _, query = _start_login(client)
+            state = query["state"][0]
 
             res = client.get("/authorize?code=attacker-code&state=attacker-state", follow_redirects=False)
 
             assert res.status_code == 400
             assert "session" not in res.cookies
             assert idp.token_requests == []
-            assert "oidc_state" not in client.cookies
+            assert f"oidc_login_{state}" in client.cookies
 
     def test_callback_should_reject_missing_state_parameter(self, idp):
         client, _ = _oidc_client()
@@ -230,8 +255,10 @@ class TestOidcLoginState:
         client, _ = _oidc_client()
         with client:
             _, query = _start_login(client)
+            state = query["state"][0]
 
-            res = client.get(f"/authorize?code=abc&state={query['state'][0]}", follow_redirects=False)
+            res = client.get(f"/authorize?code=abc&state={state}", follow_redirects=False)
 
             assert res.status_code == 401
             assert "session" not in res.cookies
+            assert f"oidc_login_{state}" not in client.cookies

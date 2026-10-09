@@ -1,6 +1,5 @@
 import asyncio
 import dataclasses
-import hmac
 import logging
 import os.path
 import secrets
@@ -183,8 +182,7 @@ class Oidc(Auth):
     app_static_public: bool = False
     login_state_max_age_seconds: int = 600
 
-    STATE_COOKIE = "oidc_state"
-    CODE_VERIFIER_COOKIE = "oidc_code_verifier"
+    LOGIN_COOKIE_PREFIX = "oidc_login_"
 
     authlib: OAuth2Session = None
     callback_func: Optional[Callable[[Request, str, dict], None]] = None # Callback to validate user authentication
@@ -225,10 +223,10 @@ class Oidc(Auth):
         self.callback_func = callback
         secure_cookies = urlparse(self.host_url).scheme == "https"
 
-        def set_login_cookie(response: Response, key: str, value: str):
+        def set_login_cookie(response: Response, state: str, code_verifier: str):
             response.set_cookie(
-                key=key,
-                value=value,
+                key=self.LOGIN_COOKIE_PREFIX + state,
+                value=code_verifier,
                 max_age=self.login_state_max_age_seconds,
                 path=callback_authorize_path,
                 httponly=True,
@@ -236,9 +234,10 @@ class Oidc(Auth):
                 samesite="lax",
             )
 
-        def clear_login_cookies(response: Response):
-            for key in (self.STATE_COOKIE, self.CODE_VERIFIER_COOKIE):
-                response.delete_cookie(key=key, path=callback_authorize_path, httponly=True, secure=secure_cookies, samesite="lax")
+        def clear_login_cookie(response: Response, state: Optional[str]):
+            if state:
+                response.delete_cookie(key=self.LOGIN_COOKIE_PREFIX + state, path=callback_authorize_path,
+                                       httponly=True, secure=secure_cookies, samesite="lax")
 
         def unauthorized_response(request: Request, exc: Unauthorized) -> Response:
             if self.unauthorized_action is not None:
@@ -264,25 +263,22 @@ class Oidc(Auth):
                 url, _ = self._oauth_session(redirect_url).create_authorization_url(
                     self.url_authorize, state=state, code_verifier=code_verifier)
                 response = RedirectResponse(url=url)
-                set_login_cookie(response, self.STATE_COOKIE, state)
-                set_login_cookie(response, self.CODE_VERIFIER_COOKIE, code_verifier)
+                set_login_cookie(response, state, code_verifier)
                 return response
 
         @asgi_app.get('/' + urlstrip(self.callback_authorize))
         async def route_callback(request: Request):
+            state = request.query_params.get("state")
             try:
-                expected_state = request.cookies.get(self.STATE_COOKIE)
-                code_verifier = request.cookies.get(self.CODE_VERIFIER_COOKIE)
-                returned_state = request.query_params.get("state")
-                if not expected_state or not code_verifier or not returned_state \
-                        or not hmac.compare_digest(expected_state.encode(), returned_state.encode()):
+                code_verifier = request.cookies.get(self.LOGIN_COOKIE_PREFIX + state) if state else None
+                if not code_verifier:
                     raise Unauthorized(status_code=400, message="Bad Request",
                                        more_info="The sign-in request is invalid or has expired. Please sign in again.")
 
                 oauth = self._oauth_session(redirect_url)
                 try:
                     oauth.fetch_token(url=self.url_oauthtoken, authorization_response=str(request.url),
-                                      state=expected_state, code_verifier=code_verifier)
+                                      state=state, code_verifier=code_verifier)
                 except AuthlibBaseError as exc:
                     logger.warning(f"[auth] oidc - authorization code exchange failed: {exc.error}")
                     raise Unauthorized(more_info="The identity provider rejected the sign-in. Please sign in again.")
@@ -306,11 +302,11 @@ class Oidc(Auth):
                     app_runner.set_userinfo(session_id=session_id, userinfo=userinfo)
 
                 response.set_cookie(key="session", value=session_id, httponly=True)
-                clear_login_cookies(response)
+                clear_login_cookie(response, state)
                 return response
             except Unauthorized as exc:
                 response = unauthorized_response(request, exc)
-                clear_login_cookies(response)
+                clear_login_cookie(response, state)
                 return response
 
     def _oauth_session(self, redirect_url: str) -> OAuth2Session:
