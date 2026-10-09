@@ -1,11 +1,12 @@
 <template>
 	<div ref="rootEl" class="CoreIFrame">
-		<div v-if="!fields.src.value" class="noURLProvided">
+		<div v-if="!safeSrc" class="noURLProvided">
 			<h2>No URL provided.</h2>
 		</div>
 		<iframe
 			v-else
-			:src="fields.src.value"
+			:src="safeSrc"
+			:sandbox="sandbox"
 			:referrerpolicy="fields.referrerPolicy.value"
 			draggable="false"
 			@load="handleLoad"
@@ -27,6 +28,9 @@ def load_handler(state):
 
 	state["status"] = "Page loaded"`;
 
+const DEFAULT_SANDBOX =
+	"allow-scripts allow-same-origin allow-forms allow-popups";
+
 const REFERRER_POLICY_OPTIONS = Object.freeze([
 	"no-referrer",
 	"no-referrer-when-downgrade",
@@ -47,7 +51,13 @@ export default {
 			src: {
 				name: "Source",
 				default: "",
-				desc: "A valid URL",
+				desc: "An http(s) or blob URL, or a path relative to the app. Other schemes, such as javascript:, are not rendered.",
+				type: FieldType.Text,
+			},
+			sandbox: {
+				name: "Sandbox",
+				default: DEFAULT_SANDBOX,
+				desc: "Space-separated iframe sandbox tokens that restrict the embedded content. The default does not allow top-level navigation. allow-same-origin is ignored for same-origin URLs that also allow scripts, since those could remove the sandbox.",
 				type: FieldType.Text,
 			},
 			referrerPolicy: {
@@ -74,11 +84,30 @@ export default {
 </script>
 
 <script setup lang="ts">
-import { inject, useTemplateRef } from "vue";
+import { computed, inject, useTemplateRef } from "vue";
 import injectionKeys from "@/injectionKeys";
+import { EMBED_URL_PROTOCOLS, sanitizeURL } from "@/utils/url";
 
 const rootEl = useTemplateRef("rootEl");
 const fields = inject(injectionKeys.evaluatedFields);
+
+const safeSrc = computed(() =>
+	sanitizeURL(fields.src.value, EMBED_URL_PROTOCOLS),
+);
+
+const sandbox = computed(() => {
+	const tokens = String(fields.sandbox.value ?? "")
+		.split(/\s+/)
+		.filter(Boolean);
+	const canEscape =
+		tokens.includes("allow-scripts") &&
+		tokens.includes("allow-same-origin") &&
+		new URL(safeSrc.value, window.location.href).origin ===
+			window.location.origin;
+	return canEscape
+		? tokens.filter((t) => t !== "allow-same-origin").join(" ")
+		: tokens.join(" ");
+});
 
 function handleLoad() {
 	const event = new CustomEvent("wf-load");

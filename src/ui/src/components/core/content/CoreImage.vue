@@ -15,7 +15,7 @@ You can also use packed files or bytes:
 <template>
 	<div ref="rootEl" class="CoreImage" :style="rootStyle" @click="handleClick">
 		<img
-			:src="fields.src.value"
+			:src="safeSrc || undefined"
 			:alt="fields.caption.value"
 			draggable="false"
 			:style="imgStyle"
@@ -91,11 +91,16 @@ export default {
 <script setup lang="ts">
 import { computed, CSSProperties, inject, useTemplateRef } from "vue";
 import injectionKeys from "@/injectionKeys";
+import { MEDIA_URL_PROTOCOLS, sanitizeURL } from "@/utils/url";
 
 const rootEl = useTemplateRef("rootEl");
 const wf = inject(injectionKeys.core);
 const fields = inject(injectionKeys.evaluatedFields);
 const componentId = inject(injectionKeys.componentId);
+
+const safeSrc = computed(() =>
+	sanitizeURL(fields.src.value, MEDIA_URL_PROTOCOLS),
+);
 
 const rootStyle = computed(() => {
 	const component = wf.getComponentById(componentId);
