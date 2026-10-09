@@ -104,5 +104,5 @@ def redact_headers(headers: Mapping[str, Any], secrets: Iterable[str] = ()) -> d
         if is_sensitive_header(name):
             redacted[name] = REDACTED
         else:
-            redacted[name] = redact_text(str(value), secrets)
+            redacted[name] = redact_text(str(value), secrets) or ""
     return redacted
