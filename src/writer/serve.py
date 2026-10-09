@@ -44,7 +44,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect, WebSocketState
 import writer
 from writer import VERSION, abstract
 from writer.ai import Graph
-from writer.app_runner import AppRunner
+from writer.app_runner import AppRunner, ImportArchiveError
 from writer.ss_types import (
     AppProcessServerResponse,
     AutogenRequestBody,
@@ -290,8 +290,11 @@ def get_asgi_app(
                 tmp_path = tmp.name
             await app_runner.import_zip(tmp_path)
             os.remove(tmp_path)
+        except ImportArchiveError as e:
+            raise HTTPException(status_code=400, detail={"summary": "Invalid archive contents", "details": str(e)}) from e
         except ValueError as e:
-            raise HTTPException(status_code=400, detail={"summary": "Invalid archive contents", "details": traceback.format_exc()}) from e
+            logging.exception("Project import failed.")
+            raise HTTPException(status_code=400, detail={"summary": "Invalid archive contents", "details": "The archive could not be imported. Check the server logs for details."}) from e
 
     @app.post("/api/autogen")
     async def autogen(requestBody: AutogenRequestBody, request: Request):
@@ -596,10 +599,10 @@ def get_asgi_app(
                         "finished_at": int(time.time())
                     }))
 
-            except Exception as e:
-                # Bubble up any unexpected error as 'error' SSE event
+            except Exception:
+                logging.exception("Blueprint API execution failed for blueprint %s.", blueprint_id)
                 await queue.put(await format_event("error", {
-                    "msg": f"Agent Builder internal error: {str(e)}",
+                    "msg": "Agent Builder internal error.",
                     "finished_at": int(time.time())
                 }))
             finally:
@@ -974,14 +977,24 @@ def get_asgi_app(
         try:
             _execute_server_setup_hook(user_app_path)
         except Exception as e:
-            custom_server_setup_mail.append(
-                {
-                    "type": "error",
-                    "title": "Custom server setup error",
-                    "message": str(e),
-                    "code": traceback.format_exc()
-                }
-            )
+            logging.exception("Custom server setup hook failed.")
+            if serve_mode == "edit":
+                custom_server_setup_mail.append(
+                    {
+                        "type": "error",
+                        "title": "Custom server setup error",
+                        "message": str(e),
+                        "code": traceback.format_exc()
+                    }
+                )
+            else:
+                custom_server_setup_mail.append(
+                    {
+                        "type": "error",
+                        "title": "Custom server setup error",
+                        "message": "The server setup hook failed. Check the server logs for details.",
+                    }
+                )
 
     return app
 
