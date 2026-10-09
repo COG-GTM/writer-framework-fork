@@ -568,3 +568,79 @@ class TestAutogen:
                 release.set()
                 worker.join(timeout=10)
             assert results["first"].status_code == 200
+
+    def test_slot_held_until_cancelled_generation_finishes(self, fake_generate):
+        import asyncio
+        import contextlib
+        import threading
+
+        import httpx
+
+        fake_module, calls = fake_generate
+        started = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+
+        def slow_generate(description, token_header=None):
+            calls.append(description)
+            started.set()
+            assert release.wait(timeout=10)
+            finished.set()
+            return {"blueprint": {"components": []}, "messages": []}
+
+        fake_module.generate_blueprint = slow_generate
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "edit")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            session_id = self._init_session(client)
+            headers = {"Origin": self.LOCAL_ORIGIN, "X-Session-Id": session_id}
+            body = {"description": "Build a chatbot"}
+
+            async def scenario():
+                transport = httpx.ASGITransport(app=asgi_app)
+                async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as ac:
+                    first = asyncio.create_task(ac.post("/api/autogen", json=body, headers=headers))
+                    while not started.is_set():
+                        await asyncio.sleep(0.01)
+                    first.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await first
+                    while_running = (await ac.post("/api/autogen", json=body, headers=headers)).status_code
+                    release.set()
+                    while not finished.is_set():
+                        await asyncio.sleep(0.01)
+                    for _ in range(100):
+                        res = await ac.post("/api/autogen", json=body, headers=headers)
+                        if res.status_code != 429:
+                            break
+                        await asyncio.sleep(0.01)
+                    return while_running, res.status_code
+
+            try:
+                while_running, after = client.portal.call(scenario)
+            finally:
+                release.set()
+            assert while_running == 429
+            assert after == 200
+        assert len(calls) == 2
+
+    def test_idle_session_histories_are_pruned(self, fake_generate, monkeypatch):
+        _, calls = fake_generate
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "edit")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            route = next(r for r in asgi_app.routes if getattr(r, "path", None) == "/api/autogen")
+            reserve = _closure_var(route.endpoint, "_reserve_autogen_slot")
+            history = _closure_var(reserve, "autogen_history")
+
+            first_session_id = self._init_session(client)
+            assert self._autogen(client, first_session_id).status_code == 200
+            assert first_session_id in history
+
+            monkeypatch.setattr(writer.serve, "AUTOGEN_RATE_LIMIT_WINDOW_SECONDS", 0)
+            second_session_id = self._init_session(client)
+            assert self._autogen(client, second_session_id).status_code == 200
+            assert first_session_id not in history
+        assert len(calls) == 2
+
+
+def _closure_var(func, name):
+    return func.__closure__[func.__code__.co_freevars.index(name)].cell_contents
