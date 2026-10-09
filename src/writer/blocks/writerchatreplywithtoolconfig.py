@@ -307,8 +307,7 @@ class WriterChatReplyWithToolConfig(WriterBlock):
                 )
 
             if message not in (None, {}, ""):
-                writer.ai.Conversation.validate_message(message)
-                conversation += message
+                conversation += writer.ai.Conversation.build_user_message(message)
                 self._set_state(conversation_state_element, conversation)
 
             if not generate_reply:
