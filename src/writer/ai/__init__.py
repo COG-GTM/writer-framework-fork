@@ -73,8 +73,9 @@ DEFAULT_COMPLETION_MODEL = "palmyra-x5"
 
 
 class _BoundClient(NamedTuple):
-    """A cached SDK client and the session/HTTPX client it was built for."""
+    """A cached SDK client and the credentials/HTTPX client it was built for."""
     client: Writer
+    api_key: Optional[str]
     session_id: Optional[str]
     agent_token: Optional[str]
     http_client: Optional[DefaultHttpxClient]
@@ -318,8 +319,9 @@ class WriterAIManager:
         # Also resolve the agent ID from the session header for
         # body-based attribution (see get_attribution_extra_body).
         # The cached client is only reused when it was built for the
-        # same session, agent token and HTTPX client: AppProcess worker
-        # threads are pooled, so a context may outlive the request.
+        # same API key, session, agent token and (open) HTTPX client:
+        # AppProcess worker threads are pooled, so a context may outlive
+        # the request.
 
         current_session = get_session()
         session_headers = (current_session.headers or {}) if current_session else {}
@@ -336,12 +338,14 @@ class WriterAIManager:
             if (
                 not force_new_client
                 and bound is not None
+                and bound.api_key == instance.token
                 and bound.session_id == session_id
                 and bound.agent_token == agent_token
                 and (
                     custom_httpx_client is None
                     or custom_httpx_client is bound.http_client
                 )
+                and not getattr(bound.http_client, "is_closed", False)
             ):
                 return bound.client
 
@@ -353,6 +357,7 @@ class WriterAIManager:
                 )
             _ai_client.set(_BoundClient(
                 client=client,
+                api_key=instance.token,
                 session_id=session_id,
                 agent_token=agent_token,
                 http_client=custom_httpx_client,

@@ -1229,6 +1229,7 @@ def fake_writer_clients(monkeypatch):
     def fake_writer_init(self, **kwargs):
         self.default_headers = kwargs.get("default_headers")
         self.http_client = kwargs.get("http_client")
+        self.api_key = kwargs.get("api_key")
         created.append(self)
 
     monkeypatch.setattr("writer.ai.Writer.__init__", fake_writer_init)
@@ -1317,6 +1318,78 @@ def test_acquire_client_binds_custom_httpx_client(
     assert client_b is not client_a
     assert client_b.http_client is http_b
     assert WriterAIManager.acquire_client() is client_b
+
+
+@pytest.mark.set_token("fake_token")
+def test_acquire_client_not_reused_after_api_key_changes(
+    emulate_app_process, monkeypatch, fake_writer_clients
+):
+    session = _make_session("session-a", {"x-agent-token": "token-a"})
+    monkeypatch.setattr("writer.core.get_session", lambda: session)
+
+    client_old = WriterAIManager.acquire_client()
+    WriterAIManager.authorize("rotated_token")
+    client_new = WriterAIManager.acquire_client()
+
+    assert client_new is not client_old
+    assert client_new.api_key == "rotated_token"
+    assert WriterAIManager.acquire_client() is client_new
+
+
+@pytest.mark.set_token("fake_token")
+def test_acquire_client_not_reused_after_http_client_closed(
+    emulate_app_process, monkeypatch, fake_writer_clients
+):
+    import httpx
+
+    session = _make_session("session-a", {"x-agent-token": "token-a"})
+    monkeypatch.setattr("writer.core.get_session", lambda: session)
+    http_client = httpx.Client()
+
+    client_a = WriterAIManager.acquire_client(custom_httpx_client=http_client)
+    http_client.close()
+    client_b = WriterAIManager.acquire_client()
+
+    assert client_b is not client_a
+    assert client_b.http_client is None
+
+
+def test_writer_block_release_resources_closes_only_owned_http_client(
+    monkeypatch
+):
+    import httpx
+
+    from writer.blocks.base_block import WriterBlock
+
+    acquired = []
+    monkeypatch.setattr(
+        WriterAIManager,
+        "acquire_client",
+        classmethod(lambda cls, custom_httpx_client=None, force_new_client=False:
+                    acquired.append(custom_httpx_client) or object()),
+    )
+
+    owned = httpx.Client()
+    block = WriterBlock.__new__(WriterBlock)
+    block._writer_sdk_client = None
+    block._owned_httpx_client = None
+    monkeypatch.setattr(block, "acquire_httpx_client", lambda: owned)
+    assert block.writer_sdk_client is block.writer_sdk_client
+    block.release_resources()
+    assert owned.is_closed
+    assert block._writer_sdk_client is None
+
+    shared = httpx.Client()
+    monkeypatch.setattr(WriterBlock, "_custom_httpx_client", shared)
+    shared_block = WriterBlock.__new__(WriterBlock)
+    shared_block._writer_sdk_client = None
+    shared_block._owned_httpx_client = None
+    monkeypatch.setattr(shared_block, "acquire_httpx_client", lambda: shared)
+    _ = shared_block.writer_sdk_client
+    shared_block.release_resources()
+    assert not shared.is_closed
+    assert acquired == [owned, shared]
+    shared.close()
 
 
 def test_app_process_messages_do_not_share_context():

@@ -95,6 +95,9 @@ class BlueprintBlock:
     def run(self):
         pass
 
+    def release_resources(self):
+        pass
+
     def create_httpx_client(self, *args, **kwargs) -> httpx.Client:
         """
         Create a custom HTTPX client with request and response logging.
@@ -344,6 +347,7 @@ class WriterBlock(BlueprintBlock):
     ):
         super().__init__(component, runner, execution_environment)
         self._writer_sdk_client: Optional[Writer] = None
+        self._owned_httpx_client: Optional[httpx.Client] = None
 
         # Initialize the SDK client via block property
         # to set the context and enable logging for AI module downstream.
@@ -357,10 +361,21 @@ class WriterBlock(BlueprintBlock):
     ) -> Writer:
         from writer.ai import WriterAIManager
 
+        http_client = self.acquire_httpx_client()
+        if http_client is not self._custom_httpx_client:
+            self._owned_httpx_client = http_client
         return WriterAIManager.acquire_client(
-            custom_httpx_client=self.acquire_httpx_client(),
+            custom_httpx_client=http_client,
             force_new_client=force_new_client
             )
+
+    def release_resources(self):
+        # Close the logging HTTPX client this block created; a class-level
+        # custom HTTPX client is shared between blocks and left open.
+        owned, self._owned_httpx_client = self._owned_httpx_client, None
+        self._writer_sdk_client = None
+        if owned is not None:
+            owned.close()
 
     def create_logger(self, env_storage_key: Optional[str] = "api_calls"):
         return super().create_logger(env_storage_key=env_storage_key)

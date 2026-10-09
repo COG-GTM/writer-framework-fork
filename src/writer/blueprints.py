@@ -448,6 +448,10 @@ class GraphNode:
         finally:
             tool.execution_time_in_seconds = time.time() - start_time
             try:
+                tool.release_resources()
+            except Exception:
+                logging.debug("Couldn't release block resources", exc_info=True)
+            try:
                 tool.execution_environment_snapshot = {
                     k: v for k, v in tool.execution_environment.items() if k != "vault"
                 }
