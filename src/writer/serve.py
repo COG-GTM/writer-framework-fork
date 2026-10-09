@@ -303,14 +303,25 @@ def get_asgi_app(
             agent_token_header
             )
 
+    def _ensure_journal_access(request: Request) -> None:
+        if serve_mode != "edit":
+            raise HTTPException(status_code=403, detail="Invalid mode.")
+        if not _check_origin_header(request.headers.get("origin")):
+            raise HTTPException(status_code=403, detail="Incorrect origin. Only local origins are allowed.")
+
     @app.post("/api/data/retrieve")
-    async def retrieve_data(requestBody: RetrieveDataRequestBody) -> RetrieveDataResponseBody:
+    async def retrieve_data(requestBody: RetrieveDataRequestBody, request: Request) -> RetrieveDataResponseBody:
+        from writer.journal import is_journal_key
         from writer.keyvalue_storage import writer_kv_storage
+
+        _ensure_journal_access(request)
 
         all_keys = writer_kv_storage.get_data_keys()
 
         keys_to_fetch = []
         for key in all_keys:
+            if not is_journal_key(key):
+                continue
             if key in requestBody.skip_keys:
                 continue
             if requestBody.key_contains and requestBody.key_contains not in key:
@@ -325,8 +336,14 @@ def get_asgi_app(
         return RetrieveDataResponseBody(result={k: v["data"] for k, v in kv_pairs})
 
     @app.post("/api/data/delete")
-    async def delete_data(requestBody: DeleteDataRequestBody) -> None:
+    async def delete_data(requestBody: DeleteDataRequestBody, request: Request) -> None:
+        from writer.journal import is_journal_key
         from writer.keyvalue_storage import writer_kv_storage
+
+        _ensure_journal_access(request)
+
+        if not all(is_journal_key(key) for key in requestBody.keys):
+            raise HTTPException(status_code=400, detail="Only Journal entries can be deleted.")
 
         async def delete_key(key: str):
             return key, await asyncio.to_thread(writer_kv_storage.delete, key)
