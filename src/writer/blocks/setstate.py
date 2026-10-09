@@ -51,7 +51,7 @@ class SetState(BlueprintBlock):
 
     def run(self):
         try:
-            element = self._get_field("element", required=True)
+            element = self._get_state_path_field("element", required=True)
             value_type = self._get_field("valueType")
             value = self._get_field("value", as_json=value_type == "JSON")
 

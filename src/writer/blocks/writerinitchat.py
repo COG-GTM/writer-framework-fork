@@ -68,7 +68,7 @@ class WriterInitChat(WriterBlock):
         try:
             import writer.ai
 
-            conversation_state_element = self._get_field("conversationStateElement")
+            conversation_state_element = self._get_state_path_field("conversationStateElement")
             temperature = float(self._get_field("temperature", False, "0.7"))
             model_id = self._get_field("modelId", False, default_field_value=DEFAULT_MODEL)
             max_tokens = int(self._get_field("max_tokens", False, "1024"))

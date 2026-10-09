@@ -84,7 +84,7 @@ class WriterChat(WriterBlock):
         try:
             import writer.ai
 
-            conversation_state_element = self._get_field(
+            conversation_state_element = self._get_state_path_field(
                 "conversationStateElement", required=True)
             use_streaming = self._get_field(
                 "useStreaming", False, "yes") == "yes"

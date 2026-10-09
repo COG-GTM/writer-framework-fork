@@ -43,7 +43,7 @@ class AddToStateList(BlueprintBlock):
 
     def run(self):
         try:
-            element_expr = self._get_field("element")
+            element_expr = self._get_state_path_field("element")
             value = self._get_field("value")
 
             element = self.evaluator.evaluate_expression(element_expr, self.instance_path, self.execution_environment)
