@@ -8,6 +8,7 @@ import pytest
 import writer.abstract
 import writer.serve
 from fastapi import FastAPI
+from writer.ss_types import EventResponse, EventResponsePayload
 
 from tests.backend import test_app_dir, test_multiapp_dir
 
@@ -472,6 +473,35 @@ class TestServe:
         event_type, final_payload = events[-1]
         assert event_type == "error"
         assert final_payload["msg"] == "Agent Builder internal error."
+        assert "secret" not in json.dumps(events)
+
+    def test_create_blueprint_job_api_hides_blueprint_failure_details(self, monkeypatch):
+        async def failing_handle_event(self, session_id, event):
+            return EventResponse(
+                type="event",
+                status="ok",
+                payload=EventResponsePayload(
+                    result={"ok": False, "result": "RuntimeError: /srv/secret/path.py exploded"},
+                    mutations={},
+                    mail=[],
+                ),
+            )
+
+        monkeypatch.setattr(writer.serve.AppRunner, "handle_event", failing_handle_event)
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "run")
+        monkeypatch.setenv("WRITER_SECRET_KEY", "abc")
+
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            with client.stream(
+                "POST", "/private/api/blueprint/8ffkuce0ermsm9dr",
+                json={"proposedSessionId": None},
+                headers={"Content-Type": "application/json"}
+            ) as response:
+                events = parse_sse_stream(response)
+
+        event_type, final_payload = events[-1]
+        assert event_type == "error"
+        assert final_payload["msg"] == "Blueprint execution failed."
         assert "secret" not in json.dumps(events)
 
     def test_import_rejects_invalid_zip_with_user_message(self):

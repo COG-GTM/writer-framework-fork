@@ -586,11 +586,16 @@ def get_asgi_app(
                     )
                 else:
                     task_status = False
-                    result = "No result returned from blueprint execution."
+                    result = None
 
                 if not task_status:
+                    if result is None:
+                        error_msg = "No result returned from blueprint execution."
+                    else:
+                        logging.error("Blueprint %s execution failed: %s", blueprint_id, result)
+                        error_msg = "Blueprint execution failed."
                     await queue.put(await format_event("error", {
-                        "msg": result,
+                        "msg": error_msg,
                         "finished_at": int(time.time())
                     }))
                 else:
