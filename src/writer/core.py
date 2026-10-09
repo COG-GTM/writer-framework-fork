@@ -14,6 +14,7 @@ import numbers
 import os
 import re
 import secrets
+import threading
 import time
 import traceback
 import typing
@@ -1683,6 +1684,7 @@ class SessionManager:
     def __init__(self) -> None:
         self.sessions: Dict[str, WriterSession] = {}
         self.verifiers: List[Callable] = []
+        self._lock = threading.RLock()
 
     def add_verifier(self, verifier: Callable) -> None:
         self.verifiers.append(verifier)
@@ -1729,14 +1731,15 @@ class SessionManager:
             new_id = self._generate_session_id()
         else:
             new_id = proposed_session_id
-        if new_id not in self.sessions and not self._make_room_for_new_session():
-            logging.warning(
-                "Session rejected: the limit of %d live sessions has been reached.",
-                self.MAX_SESSIONS,
-            )
-            return None
         new_session = WriterSession(new_id, cookies, headers)
-        self.sessions[new_id] = new_session
+        with self._lock:
+            if new_id not in self.sessions and not self._make_room_for_new_session():
+                logging.warning(
+                    "Session rejected: the limit of %d live sessions has been reached.",
+                    self.MAX_SESSIONS,
+                )
+                return None
+            self.sessions[new_id] = new_session
         return new_session
 
     def get_session(
@@ -1757,30 +1760,32 @@ class SessionManager:
         return secrets.token_hex(SessionManager.TOKEN_SIZE_BYTES)
 
     def clear_all(self) -> None:
-        self.sessions = {}
+        with self._lock:
+            self.sessions = {}
 
     def close_session(self, session_id: str) -> None:
-        if session_id not in self.sessions:
-            return
-        del self.sessions[session_id]
+        with self._lock:
+            self.sessions.pop(session_id, None)
 
     def prune_sessions(self) -> None:
         now = int(time.time())
         idle_cutoff = now - self.IDLE_SESSION_MAX_SECONDS
         unengaged_cutoff = now - self.UNENGAGED_SESSION_MAX_SECONDS
-        prune_sessions = []
-        for session_id, session in list(self.sessions.items()):
-            if session.last_active_timestamp < idle_cutoff:
-                prune_sessions.append(session_id)
-            elif not session.is_engaged and session.last_active_timestamp < unengaged_cutoff:
-                prune_sessions.append(session_id)
-        for session_id in prune_sessions:
-            self.close_session(session_id)
+        with self._lock:
+            prune_sessions = []
+            for session_id, session in list(self.sessions.items()):
+                if session.last_active_timestamp < idle_cutoff:
+                    prune_sessions.append(session_id)
+                elif not session.is_engaged and session.last_active_timestamp < unengaged_cutoff:
+                    prune_sessions.append(session_id)
+            for session_id in prune_sessions:
+                self.close_session(session_id)
 
     def _make_room_for_new_session(self) -> bool:
         """
         Returns whether a new session can be stored without exceeding MAX_SESSIONS,
         pruning expired sessions and evicting the oldest un-engaged session if needed.
+        Must be called with the lock held.
         """
         if len(self.sessions) < self.MAX_SESSIONS:
             return True

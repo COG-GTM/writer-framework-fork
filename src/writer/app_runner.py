@@ -394,6 +394,10 @@ class AppProcess(multiprocessing.Process):
                     payload=self._handle_session_init(si_req_payload),
                 )
 
+            if type == "closeSession":
+                writer.session_manager.close_session(session_id)
+                return AppProcessServerResponse(status="ok", status_message=None, payload=None)
+
             session = writer.session_manager.get_session(session_id)
             if not session:
                 raise MessageHandlingException("Session not found.")
@@ -1056,6 +1060,11 @@ class AppRunner:
         )
         is_ok: bool = response.status == "ok"
         return is_ok
+
+    async def close_session(self, session_id: str) -> None:
+        await self.dispatch_message(
+            session_id, AppProcessServerRequest(type="closeSession", payload=None)
+        )
 
     async def init_session(self, payload: InitSessionRequestPayload) -> AppProcessServerResponse:
         return await self.dispatch_message(

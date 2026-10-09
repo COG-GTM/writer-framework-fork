@@ -561,6 +561,7 @@ def get_asgi_app(
         # --- The main worker logic that produces events ---
 
         async def event_logic(queue: asyncio.Queue):
+            session_id: Optional[str] = None
             try:
                 await queue.put(await format_event("status", {"status": "in progress", "created_at": int(time.time())}))
                 await queue.put(await format_event("status", {"status": "initializing", "msg": "Initializing session..."}))
@@ -654,6 +655,10 @@ def get_asgi_app(
                     "finished_at": int(time.time())
                 }))
             finally:
+                if session_id is not None:
+                    # Free the job's session so API calls don't accumulate live sessions
+                    with suppress(BaseException):
+                        await asyncio.shield(app_runner.close_session(session_id))
                 # Always mark stream completion for consumer
                 await queue.put("data: [DONE]\n\n")
 

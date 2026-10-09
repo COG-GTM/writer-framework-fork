@@ -1172,6 +1172,24 @@ class TestSessionManager:
         assert sm.get_new_session(None, None, self.proposed_session_id) is not None
         assert len(sm.sessions) == 1
 
+    def test_max_sessions_concurrent_creation(self) -> None:
+        import threading
+
+        sm = SessionManager()
+        sm.MAX_SESSIONS = 3
+        barrier = threading.Barrier(12)
+
+        def create():
+            barrier.wait()
+            sm.get_new_session(None, None, None)
+
+        threads = [threading.Thread(target=create) for _ in range(12)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert len(sm.sessions) == 3
+
     def test_session_verifiers(self) -> None:
         def session_verifier_1(cookies: Dict[str, str]):
             if cookies != {"testCookie": "yes"}:

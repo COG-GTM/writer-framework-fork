@@ -310,6 +310,26 @@ class TestServe:
                     assert "artifact" in final_payload
                     assert final_payload.get("artifact") == "987127"
 
+    def test_create_blueprint_job_api_closes_session(self, monkeypatch):
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "run")
+        monkeypatch.setenv("WRITER_SECRET_KEY", "abc")
+        closed = []
+        original_close = writer.app_runner.AppRunner.close_session
+
+        async def recording_close(self, session_id):
+            closed.append(session_id)
+            await original_close(self, session_id)
+
+        monkeypatch.setattr(writer.app_runner.AppRunner, "close_session", recording_close)
+
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            with client.stream("POST", "/private/api/blueprint/8ffkuce0ermsm9dr",
+                                json={"proposedSessionId": None},
+                                headers={"Content-Type": "application/json"}) as response:
+                parse_sse_stream(response)
+        assert len(closed) == 1
+        assert closed[0] is not None
+
     def test_create_blueprint_job_api_error_handling(self, monkeypatch):
         asgi_app = writer.serve.get_asgi_app(test_app_dir, "run")
         monkeypatch.setenv("WRITER_SECRET_KEY", "abc")
