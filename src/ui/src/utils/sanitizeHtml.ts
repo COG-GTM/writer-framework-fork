@@ -19,12 +19,12 @@ export const SANITIZE_HTML_CONFIG: Config = {
 		"noscript",
 	],
 	ALLOWED_URI_REGEXP:
-		/^(?:(?:https?|mailto|tel):|[^a-z]|[a-z+.-]+(?:[^a-z+.\-:]|$))/i,
+		/^(?:(?:https?|mailto|tel):|(?![/\\]{2})[^a-z]|[a-z+.-]+(?:[^a-z+.\-:]|$))/i,
 };
 
 const SAFE_STYLE_REGEXP =
-	/^\s*background(?:-color)?\s*:\s*[#a-z0-9(),.%\s-]+;?\s*$/i;
-const UNSAFE_STYLE_REGEXP = /url\s*\(|expression|image|var\s*\(|\\/i;
+	/^\s*background(?:-color)?\s*:\s*[#a-z0-9(),./%\s-]+;?\s*$/i;
+const UNSAFE_STYLE_REGEXP = /url\s*\(|expression|image|var\s*\(|\\|\/\*/i;
 
 /**
  * Only keep inline styles that set a background colour (used by annotated

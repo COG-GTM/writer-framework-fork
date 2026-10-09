@@ -52,19 +52,25 @@ describe("sanitizeHtml", () => {
 		"JaVaScRiPt:alert(1)",
 		"vbscript:msgbox(1)",
 		"data:text/html,<script>alert(1)</script>",
+		"//evil.test/x",
+		"/\\evil.test/x",
+		"\\\\evil.test/x",
 	])("drops dangerous link protocol %s", (href) => {
 		const html = sanitize(`<a href="${href}">x</a>`);
 		expect(html).toBe("<a>x</a>");
 	});
 
-	it.each(["https://writer.com", "mailto:a@b.com", "/static/a.png", "#top"])(
-		"keeps safe link %s",
-		(href) => {
-			expect(sanitize(`<a href="${href}">x</a>`)).toBe(
-				`<a href="${href}">x</a>`,
-			);
-		},
-	);
+	it.each([
+		"https://writer.com",
+		"mailto:a@b.com",
+		"/static/a.png",
+		"#top",
+		"docs/a.md",
+	])("keeps safe link %s", (href) => {
+		expect(sanitize(`<a href="${href}">x</a>`)).toBe(
+			`<a href="${href}">x</a>`,
+		);
+	});
 
 	it("removes forbidden tags used by mXSS and UI-redress payloads", () => {
 		const html = sanitize(
@@ -125,6 +131,8 @@ describe("sanitizeHtml", () => {
 		["background: red", true],
 		["background-color: #ffcc00;", true],
 		["background: hsl(10, 50%, 50%)", true],
+		["background: rgb(255 0 0 / 50%)", true],
+		["background: red /* x */", false],
 		["background: url(https://evil.test/x)", false],
 		["background: red; position: fixed", false],
 		["background: image-set('x.png' 1x)", false],
