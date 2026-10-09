@@ -75,6 +75,8 @@ const tracking = useWriterTracking(wf);
 
 const { pushToast } = useToasts();
 
+const AUTOGEN_MAX_DESCRIPTION_LENGTH = 8000;
+
 const isBusy = ref(false);
 const prompt = ref("");
 const errorMessage = ref<string | null>(null); // Track error messages
@@ -145,6 +147,11 @@ async function handleAutogen() {
 		return;
 	}
 
+	if (description.length > AUTOGEN_MAX_DESCRIPTION_LENGTH) {
+		errorMessage.value = `Instructions are too long. Keep them under ${AUTOGEN_MAX_DESCRIPTION_LENGTH} characters.`;
+		return;
+	}
+
 	isBusy.value = true;
 	errorMessage.value = null;
 
@@ -163,11 +170,17 @@ async function handleAutogen() {
 				method: "POST",
 				headers: {
 					"Content-Type": "application/json",
+					"X-Session-Id": wf.getSessionId(),
 				},
 				body: JSON.stringify({ description }),
 				signal: autogenController.signal,
 			},
 		);
+		if (response.status === 429) {
+			errorMessage.value =
+				"Too many generation requests. Wait a few minutes and try again.";
+			return;
+		}
 		if (!response.ok) {
 			errorMessage.value = `Agent failed to generate. Try again.`;
 			return;

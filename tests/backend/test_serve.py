@@ -406,3 +406,165 @@ class TestServe:
             response_json = res.json()
             assert response_json["status"] == "error"
             assert "Project saver process is not running" in response_json["message"]
+
+
+class TestAutogen:
+
+    LOCAL_ORIGIN = "http://localhost:4005"
+
+    @pytest.fixture
+    def fake_generate(self, monkeypatch):
+        import sys
+        import threading
+        import types
+
+        calls = []
+
+        def generate_blueprint(description, token_header=None):
+            calls.append({
+                "description": description,
+                "token_header": token_header,
+                "thread": threading.current_thread(),
+            })
+            return {"blueprint": {"components": []}, "messages": []}
+
+        fake_module = types.ModuleType("writer.autogen")
+        fake_module.generate_blueprint = generate_blueprint  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "writer.autogen", fake_module)
+        monkeypatch.setattr(writer, "autogen", fake_module, raising=False)
+        return fake_module, calls
+
+    def _init_session(self, client) -> str:
+        res = client.post(
+            "/api/init",
+            json={"proposedSessionId": None},
+            headers={"Content-Type": "application/json", "Origin": self.LOCAL_ORIGIN},
+        )
+        assert res.status_code == 200
+        return res.json()["sessionId"]
+
+    def _autogen(self, client, session_id, description="Build a chatbot", **headers):
+        return client.post(
+            "/api/autogen",
+            json={"description": description},
+            headers={
+                "Origin": self.LOCAL_ORIGIN,
+                "X-Session-Id": session_id,
+                **headers,
+            },
+        )
+
+    def test_rejected_in_run_mode(self, fake_generate):
+        _, calls = fake_generate
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "run")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            session_id = self._init_session(client)
+            res = self._autogen(client, session_id)
+            assert res.status_code == 403
+        assert calls == []
+
+    def test_rejected_without_session(self, fake_generate):
+        _, calls = fake_generate
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "edit")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            res = client.post(
+                "/api/autogen",
+                json={"description": "Build a chatbot"},
+                headers={"Origin": self.LOCAL_ORIGIN},
+            )
+            assert res.status_code == 403
+            res = self._autogen(client, "not-a-real-session")
+            assert res.status_code == 403
+        assert calls == []
+
+    def test_rejected_from_remote_origin(self, fake_generate):
+        _, calls = fake_generate
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "edit")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            session_id = self._init_session(client)
+            res = self._autogen(client, session_id, Origin="https://evil.example")
+            assert res.status_code == 403
+        assert calls == []
+
+    def test_rejected_without_json_content_type(self, fake_generate):
+        _, calls = fake_generate
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "edit")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            session_id = self._init_session(client)
+            res = client.post(
+                "/api/autogen",
+                content=json.dumps({"description": "Build a chatbot"}).encode(),
+                headers={"Origin": self.LOCAL_ORIGIN, "X-Session-Id": session_id},
+            )
+            assert "content-type" not in {k.lower() for k in res.request.headers}
+            assert res.status_code == 415
+        assert calls == []
+
+    def test_rejects_oversized_description(self, fake_generate):
+        from writer.ss_types import AUTOGEN_MAX_DESCRIPTION_LENGTH
+
+        _, calls = fake_generate
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "edit")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            session_id = self._init_session(client)
+            res = self._autogen(client, session_id, description="a" * (AUTOGEN_MAX_DESCRIPTION_LENGTH + 1))
+            assert res.status_code == 422
+        assert calls == []
+
+    def test_generates_off_the_event_loop(self, fake_generate):
+        import threading
+
+        _, calls = fake_generate
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "edit")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            session_id = self._init_session(client)
+            res = self._autogen(client, session_id, **{"X-Agent-Token": "agent-token"})
+            assert res.status_code == 200
+            assert res.json() == {"blueprint": {"components": []}, "messages": []}
+        assert len(calls) == 1
+        assert calls[0]["description"] == "Build a chatbot"
+        assert calls[0]["token_header"] == "agent-token"
+        assert calls[0]["thread"] is not threading.main_thread()
+
+    def test_rate_limited_per_session(self, fake_generate, monkeypatch):
+        monkeypatch.setattr(writer.serve, "AUTOGEN_RATE_LIMIT_MAX_REQUESTS", 2)
+        _, calls = fake_generate
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "edit")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            session_id = self._init_session(client)
+            assert self._autogen(client, session_id).status_code == 200
+            assert self._autogen(client, session_id).status_code == 200
+            assert self._autogen(client, session_id).status_code == 429
+            other_session_id = self._init_session(client)
+            assert self._autogen(client, other_session_id).status_code == 200
+        assert len(calls) == 3
+
+    def test_concurrent_request_rejected_while_server_stays_responsive(self, fake_generate):
+        import threading
+
+        fake_module, _ = fake_generate
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_generate(description, token_header=None):
+            started.set()
+            assert release.wait(timeout=10)
+            return {"blueprint": {"components": []}, "messages": []}
+
+        fake_module.generate_blueprint = slow_generate
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "edit")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            session_id = self._init_session(client)
+            results = {}
+            worker = threading.Thread(
+                target=lambda: results.setdefault("first", self._autogen(client, session_id))
+            )
+            worker.start()
+            try:
+                assert started.wait(timeout=10)
+                assert client.get("/api/health").status_code == 200
+                assert self._autogen(client, session_id).status_code == 429
+            finally:
+                release.set()
+                worker.join(timeout=10)
+            assert results["first"].status_code == 200
