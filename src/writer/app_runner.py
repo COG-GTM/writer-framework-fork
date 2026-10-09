@@ -66,6 +66,9 @@ from writer.wf_project import WfProjectContext
 
 user_code_logger = logging.getLogger("user_code")
 
+CONTROL_EVENT_HANDLERS = frozenset({"stop_blueprint_run"})
+CONTROL_MAX_WORKERS = 4
+
 
 class MessageHandlingException(Exception):
     pass
@@ -124,6 +127,7 @@ class AppProcess(multiprocessing.Process):
         self.handler_registry = EventHandlerRegistry()
         self.middleware_registry = MiddlewareRegistry()
         self.executor: Optional[concurrent.futures.ThreadPoolExecutor] = None
+        self.control_executor: Optional[concurrent.futures.ThreadPoolExecutor] = None
 
     def _load_module(self) -> ModuleType:
         """
@@ -631,6 +635,8 @@ class AppProcess(multiprocessing.Process):
             if is_app_process_server_terminated.is_set():
                 return
             self.executor.shutdown(wait=False)
+            if self.control_executor:
+                self.control_executor.shutdown(wait=False)
             with self.server_conn_lock:
                 self.server_conn.send(None)
                 is_app_process_server_terminated.set()
@@ -666,15 +672,30 @@ class AppProcess(multiprocessing.Process):
         if not self.executor:
             return
         (message_id, session_id, request) = packet
-        thread_pool_future = self.executor.submit(
+        executor = self.executor
+        if self.control_executor and self._is_control_request(request):
+            executor = self.control_executor
+        thread_pool_future = executor.submit(
             self._handle_message_and_get_packet, message_id, session_id, request
         )
         thread_pool_future.add_done_callback(self._send_packet)
+
+    @staticmethod
+    def _is_control_request(request: AppProcessServerRequest) -> bool:
+        """Requests that must not wait behind busy event handlers."""
+        if request.type != "event":
+            return False
+        payload = request.payload
+        handler = payload.get("handler") if isinstance(payload, dict) else getattr(payload, "handler", None)
+        return handler in CONTROL_EVENT_HANDLERS
 
     def run(self) -> None:
         max_workers = int(os.getenv("WRITER_MAX_WORKERS", (os.cpu_count() or 4) * 10))
         self.executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=max_workers,
+        )
+        self.control_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=CONTROL_MAX_WORKERS, thread_name_prefix="writer-control"
         )
         self.server_conn_lock = threading.Lock()
         self.client_conn.close()

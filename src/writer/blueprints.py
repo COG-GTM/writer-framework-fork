@@ -20,9 +20,82 @@ from writer.ss_types import BlueprintExecutionError, BlueprintExecutionLog, Writ
 MAX_DAG_DEPTH = 32
 MAX_LOG_ITERABLE_SIZE = 100
 MAX_LOG_STRING_LENGTH = 5000
+DEFAULT_MAX_CONCURRENT_RUNS_PER_SESSION = 10
 
 _current_block: ContextVar[Optional[writer.blocks.base_block.BlueprintBlock]] = \
     ContextVar("current_block", default=None)
+
+
+class BlueprintRunLimitExceeded(RuntimeError):
+    pass
+
+
+class BlueprintNodeExecutor:
+    """Thread pool dedicated to blueprint nodes.
+
+    Kept separate from the app process's event pool so handlers waiting on
+    node futures never compete with those nodes for a worker. A task is only
+    handed to the pool when a worker is guaranteed to be free; otherwise it
+    runs inline in the submitting thread. Queued node futures therefore can't
+    be starved by waiters, including nested runners (Run blueprint, For-each,
+    tool calling) that wait from inside a node.
+    """
+
+    def __init__(self, max_workers: int):
+        self.max_workers = max_workers
+        self._executor = ThreadPoolExecutor(
+            max_workers=max_workers, thread_name_prefix="writer-blueprint-node"
+        )
+        self._slots = threading.BoundedSemaphore(max_workers)
+
+    def submit(self, fn, *args, **kwargs) -> Future:
+        if not self._slots.acquire(blocking=False):
+            return self._run_inline(fn, *args, **kwargs)
+        try:
+            future = self._executor.submit(fn, *args, **kwargs)
+        except BaseException:
+            self._slots.release()
+            raise
+        future.add_done_callback(lambda _: self._slots.release())
+        return future
+
+    @staticmethod
+    def _run_inline(fn, *args, **kwargs) -> Future:
+        future: Future = Future()
+        future.set_running_or_notify_cancel()
+        try:
+            result = fn(*args, **kwargs)
+        except BaseException as e:
+            future.set_exception(e)
+        else:
+            future.set_result(result)
+        return future
+
+    def shutdown(self, wait: bool = True):
+        self._executor.shutdown(wait=wait)
+
+
+_node_executor: Optional[BlueprintNodeExecutor] = None
+_node_executor_lock = threading.Lock()
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, default))
+    except ValueError:
+        logging.warning("Ignoring invalid integer value for %s.", name)
+        return default
+
+
+def get_node_executor() -> BlueprintNodeExecutor:
+    global _node_executor
+    with _node_executor_lock:
+        if _node_executor is None:
+            max_workers = _env_int(
+                "WRITER_BLUEPRINT_MAX_WORKERS", (os.cpu_count() or 4) * 10
+            )
+            _node_executor = BlueprintNodeExecutor(max(1, max_workers))
+        return _node_executor
 
 
 class BlueprintRunManager:
@@ -64,6 +137,12 @@ class BlueprintRunner:
         self.session = session
         self.executor_lock = threading.Lock()
         self.run_manager = BlueprintRunManager()
+        self.max_concurrent_runs = _env_int(
+            "WRITER_MAX_CONCURRENT_BLUEPRINT_RUNS_PER_SESSION",
+            DEFAULT_MAX_CONCURRENT_RUNS_PER_SESSION,
+        )
+        self._active_runs = 0
+        self._active_runs_lock = threading.Lock()
 
     @property
     def api_blueprints(self):
@@ -74,34 +153,35 @@ class BlueprintRunner:
         return self._gather_cron_blueprints()
 
     @contextmanager
-    def _get_executor(self) -> Generator[ThreadPoolExecutor, None, None]:
-        """Return the application's thread pool executor.
+    def _get_executor(self) -> Generator[BlueprintNodeExecutor, None, None]:
+        """Return the executor blueprint nodes run on.
 
-        In normal operation we reuse the main executor provided by the running
-        application process. In situations where that process is unavailable
-        (for example during tests) a temporary executor is created.
+        Never the app process's event pool: event handlers block on node
+        futures, so sharing that pool lets bursts of runs deadlock it.
         """
+        yield get_node_executor()
 
-        new_executor = None
+    @contextmanager
+    def admit_run(self) -> Generator[None, None, None]:
+        """Limit concurrent top-level runs per session.
+
+        Nested runs started by a block (Run blueprint, For-each, tool calling)
+        belong to an already admitted run and aren't counted.
+        """
+        if get_current_block() is not None or self.max_concurrent_runs <= 0:
+            yield
+            return
+        with self._active_runs_lock:
+            if self._active_runs >= self.max_concurrent_runs:
+                raise BlueprintRunLimitExceeded(
+                    f"Too many concurrent blueprint runs for this session (limit: {self.max_concurrent_runs})."
+                )
+            self._active_runs += 1
         try:
-            try:
-                current_app_process = writer.core.get_app_process()
-                executor = current_app_process.executor
-            except RuntimeError:
-                logging.info(
-                    "The main pool executor isn't being reused. This is only expected in test or debugging situations."
-                )
-                new_executor = ThreadPoolExecutor(20)  # New executor for debugging/testing
-                executor = new_executor
-
-            if not executor:
-                raise RuntimeError(
-                    "The main pool executor isn't available. This is only expected in test or debugging situations."
-                )
-            yield executor
+            yield
         finally:
-            if new_executor:
-                new_executor.shutdown()
+            with self._active_runs_lock:
+                self._active_runs -= 1
 
     def execute_ui_trigger(
         self, ref_component_id: str, ref_event_type: str, execution_environment: Dict = {}
@@ -806,11 +886,16 @@ class GraphRunner:
         if not self.queue:
             raise WriterConfigurationError("No start nodes found in the blueprint.")
 
-        with self.runner._get_executor() as executor:
-            with self.runner.run_manager.register(self.run_id) as event:
-                return self._execute(executor, event)
+        with self.runner.admit_run():
+            with self.runner._get_executor() as executor:
+                with self.runner.run_manager.register(self.run_id) as event:
+                    return self._execute(executor, event)
 
-    def _execute(self, executor: ThreadPoolExecutor, abort_event: threading.Event) -> Optional[Any]:
+    def _execute(
+        self,
+        executor: Union[BlueprintNodeExecutor, ThreadPoolExecutor],
+        abort_event: threading.Event,
+    ) -> Optional[Any]:
         with use_journal_record_context(self.execution_environment, self.status_logger.title, self.graph) as journal_record:
             while self.queue or self.futures:
                 while self.queue:
