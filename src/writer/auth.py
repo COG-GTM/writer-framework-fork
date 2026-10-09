@@ -1,10 +1,16 @@
 import asyncio
+import base64
+import binascii
 import dataclasses
+import hmac
+import ipaddress
 import logging
 import os.path
+import threading
 import time
 from abc import ABCMeta, abstractmethod
-from typing import Callable, Dict, Optional
+from collections import OrderedDict
+from typing import Callable, List, Optional, Sequence, Tuple, Union
 from urllib.parse import urlparse
 
 from authlib.integrations.requests_client.oauth2_session import OAuth2Session  # type: ignore
@@ -19,8 +25,67 @@ from writer.ss_types import InitSessionRequestPayload
 
 logger = logging.getLogger('writer')
 
-# Dictionary for storing failed attempts {ip_address: timestamp}
-failed_attempts: Dict[str, float] = {}
+IPNetwork = Union[ipaddress.IPv4Network, ipaddress.IPv6Network]
+
+
+class FailedAttempts:
+    """
+    Bounded, expiring counter of failed logins per key (client IP or username).
+
+    A key is throttled once it reaches `limit` failures within `window` seconds and stays
+    throttled until that window ends. Expired keys are dropped and the oldest keys are
+    evicted beyond `max_entries`, so memory stays bounded.
+
+    >>> attempts = FailedAttempts(window=5, limit=1, max_entries=1000)
+    >>> attempts.record("1.2.3.4")
+    >>> attempts.retry_after("1.2.3.4")
+    """
+
+    def __init__(self, window: float, limit: int = 1, max_entries: int = 10000):
+        self.window = window
+        self.limit = limit
+        self.max_entries = max_entries
+        self._entries: "OrderedDict[str, Tuple[float, int]]" = OrderedDict()
+        self._lock = threading.Lock()
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._entries
+
+    def record(self, key: str, now: Optional[float] = None) -> None:
+        now = time.time() if now is None else now
+        with self._lock:
+            self._prune(now)
+            entry = self._entries.get(key)
+            if entry is None:
+                self._entries[key] = (now, 1)
+            else:
+                self._entries[key] = (entry[0], entry[1] + 1)
+            while len(self._entries) > self.max_entries:
+                self._entries.popitem(last=False)
+
+    def retry_after(self, key: str, now: Optional[float] = None) -> float:
+        """
+        Seconds the key still has to wait before its next attempt (0 if it may try now).
+        """
+        now = time.time() if now is None else now
+        with self._lock:
+            self._prune(now)
+            entry = self._entries.get(key)
+            if entry is None or entry[1] < self.limit:
+                return 0
+            return max(0.0, self.window - (now - entry[0]))
+
+    def _prune(self, now: float) -> None:
+        # Entries are kept in window-start order, so expired ones are always at the front.
+        while self._entries:
+            window_start, _ = next(iter(self._entries.values()))
+            if now - window_start < self.window:
+                break
+            self._entries.popitem(last=False)
+
 
 class Unauthorized(Exception):
     """
@@ -63,11 +128,25 @@ class BasicAuth(Auth):
     Brute force protection
     ----------------------
 
-    A simple brute force protection is implemented by default. If a user fails to log in, the IP of this user is blocked.
-    Writer framework will ban the IP from either the `X-Forwarded-For` header or the `X-Real-IP` header or the client IP address.
+    A simple brute force protection is implemented by default. If a login fails, the client IP has to wait
+    `delay_after_failure` seconds (1 second by default) before it can try again. Independently of the IP, a username
+    is rejected for the rest of a `username_failure_window` (60 seconds by default) once it has collected
+    `max_failures_per_username` failed logins (10 by default) in that window. Set `max_failures_per_username=None`
+    to disable the per-username limit.
 
-    When a user fails to log in, they wait 1 second before they can try again. This time can be modified by
-    modifying the value of `delay_after_failure`.
+    The client IP is the address of the TCP peer (`request.client.host`). When uvicorn runs with `--proxy-headers`
+    (the default), it already rewrites the peer from `X-Forwarded-For` for the proxies listed in `--forwarded-allow-ips`.
+    `X-Forwarded-For` / `X-Real-IP` are only read by Writer Framework when the peer is listed in `trusted_proxies`
+    (IP addresses or CIDR ranges); otherwise they are ignored, because any client can set them. List only the
+    proxies themselves: any peer in `trusted_proxies` can choose the IP it is throttled under.
+
+    >>> _auth = auth.BasicAuth(
+    >>>     login=os.getenv('LOGIN'),
+    >>>     password=os.getenv('PASSWORD'),
+    >>>     trusted_proxies=["10.0.0.0/8"]
+    >>> )
+
+    Failures are kept in memory only for their window, for at most `max_tracked_failures` IPs and as many usernames.
 
     >>> _auth = auth.BasicAuth(
     >>>     login=os.getenv('LOGIN'),
@@ -89,6 +168,13 @@ class BasicAuth(Auth):
     password: str
     delay_after_failure: int = 1  # limit attempt when authentication fail (reduce brute force risk)
     block_user_after_failure: bool = True  # delay the answer to the user after a failed login
+    trusted_proxies: Sequence[str] = ()  # proxies (IP or CIDR) allowed to set X-Forwarded-For / X-Real-IP
+    max_failures_per_username: Optional[int] = 10  # failed logins per username allowed within username_failure_window
+    username_failure_window: int = 60
+    max_tracked_failures: int = 10000  # upper bound of client IPs (and of usernames) remembered after a failure
+
+    failed_attempts: Optional[FailedAttempts] = dataclasses.field(default=None, init=False, repr=False)
+    failed_attempts_per_username: Optional[FailedAttempts] = dataclasses.field(default=None, init=False, repr=False)
 
     callback_func: Optional[Callable[[Request, str, dict], None]] = None  # Callback to validate user authentication
     unauthorized_action: Optional[Callable[[Request, Unauthorized], Response]] = None  # Callback to build its own page when a user is not allowed
@@ -102,36 +188,59 @@ class BasicAuth(Auth):
         self.unauthorized_action = unauthorized_action
         self.callback_func = callback
 
+        failed_attempts = FailedAttempts(window=self.delay_after_failure, limit=1, max_entries=self.max_tracked_failures)
+        failed_attempts_per_username = FailedAttempts(
+            window=self.username_failure_window,
+            limit=self.max_failures_per_username or 0,
+            max_entries=self.max_tracked_failures,
+        )
+        self.failed_attempts = failed_attempts
+        self.failed_attempts_per_username = failed_attempts_per_username
+        trusted_networks = _parse_networks(self.trusted_proxies)
+
         @asgi_app.middleware("http")
         async def basicauth_middleware(request: Request, call_next):
-            import base64
-            client_ip = _client_ip(request)
+            client_ip = _client_ip(request, trusted_networks)
+            username: Optional[str] = None
 
             try:
-                if client_ip in failed_attempts and time.time() - failed_attempts[client_ip] < self.delay_after_failure:
-                    remaining_time = int(self.delay_after_failure - (time.time() - failed_attempts[client_ip]))
-                    raise Unauthorized(status_code=429, message="Too Many Requests", more_info=f"You can try to log in every {self.delay_after_failure}s. Your next try is in {remaining_time}s.")
+                remaining_time = failed_attempts.retry_after(client_ip)
+                if remaining_time > 0:
+                    raise Unauthorized(status_code=429, message="Too Many Requests", more_info=f"You can try to log in every {self.delay_after_failure}s. Your next try is in {int(remaining_time)}s.")
 
                 session_id = session_manager.generate_session_id()
                 _auth = request.headers.get('Authorization')
                 if _auth is None:
                     return HTMLResponse("", status.HTTP_401_UNAUTHORIZED, {"WWW-Authenticate": "Basic"})
 
-                scheme, data = (_auth or ' ').split(' ', 1)
+                scheme, _, data = _auth.partition(' ')
                 if scheme != 'Basic':
                     return HTMLResponse("", status.HTTP_401_UNAUTHORIZED, {"WWW-Authenticate": "Basic"})
 
-                username, password = base64.b64decode(data).decode().split(':', 1)
+                try:
+                    username, password = base64.b64decode(data, validate=True).decode().split(':', 1)
+                except (binascii.Error, UnicodeDecodeError, ValueError):
+                    raise Unauthorized()
+
+                if self.max_failures_per_username:
+                    remaining_time = failed_attempts_per_username.retry_after(username)
+                    if remaining_time > 0:
+                        raise Unauthorized(status_code=429, message="Too Many Requests", more_info=f"Too many failed logins for this user. Your next try is in {int(remaining_time)}s.")
+
                 if self.callback_func:
                     self.callback_func(request, session_id, {'username': username})
                 else:
-                    if username != self.login or password != self.password:
+                    login_ok = hmac.compare_digest(username.encode(), self.login.encode())
+                    password_ok = hmac.compare_digest(password.encode(), self.password.encode())
+                    if not (login_ok and password_ok):
                         raise Unauthorized()
 
                 return await call_next(request)
             except Unauthorized as exc:
                 if exc.status_code != 429:
-                    failed_attempts[client_ip] = time.time()
+                    failed_attempts.record(client_ip)
+                    if username is not None and self.max_failures_per_username:
+                        failed_attempts_per_username.record(username)
 
                     if self.block_user_after_failure:
                         await asyncio.sleep(self.delay_after_failure)
@@ -393,23 +502,47 @@ def urlstrip(url_path: str):
     """
     return url_path.strip('/')
 
-def _client_ip(request: Request) -> str:
+def _parse_networks(addresses: Sequence[str]) -> List[IPNetwork]:
+    """
+    >>> _parse_networks(["10.0.0.0/8", "127.0.0.1"])
+    """
+    return [ipaddress.ip_network(address.strip(), strict=False) for address in addresses]
+
+
+def _is_trusted(address: str, trusted_networks: Sequence[IPNetwork]) -> bool:
+    try:
+        ip = ipaddress.ip_address(address.strip())
+    except ValueError:
+        return False
+    return any(ip in network for network in trusted_networks)
+
+
+def _client_ip(request: Request, trusted_networks: Sequence[IPNetwork] = ()) -> str:
     """
     Get the client IP address from the request.
 
+    The TCP peer address is used unless the peer is a trusted proxy. Only then are
+    `X-Forwarded-For` (read right to left, skipping trusted proxies) and `X-Real-IP` used.
+
     >>> _client_ip(request)
+    >>> _client_ip(request, _parse_networks(["10.0.0.0/8"]))
     """
+    client = request.client
+    peer_ip = client.host if client is not None else ""
+    if not _is_trusted(peer_ip, trusted_networks):
+        return peer_ip
+
     x_forwarded_for = request.headers.get("X-Forwarded-For")
     if x_forwarded_for:
-        # X-Forwarded-For can contain a list of IPs, the first is the real IP of the client
-        ip = x_forwarded_for.split(",")[0].strip()
-    else:
-        # Otherwise, use the direct connection IP
-        x_real_ip = request.headers.get("X-Real-IP")
-        if x_real_ip is not None:
-            ip = x_real_ip
-        else:
-            client = request.client
-            ip = client.host if client is not None else ""
+        hops = [hop.strip() for hop in x_forwarded_for.split(",") if hop.strip()]
+        for hop in reversed(hops):
+            if not _is_trusted(hop, trusted_networks):
+                return hop
+        if hops:
+            return hops[0]
 
-    return ip
+    x_real_ip = request.headers.get("X-Real-IP")
+    if x_real_ip:
+        return x_real_ip.strip()
+
+    return peer_ip
