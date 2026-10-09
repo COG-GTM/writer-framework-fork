@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+
 import writer.core
 from writer import vault as vault_module
 from writer.keyvalue_storage import KeyValueStorage, resolve_tenant_ids
@@ -119,3 +120,26 @@ def test_vault_refresh_clears_all_tenants(kv_env, monkeypatch):
     vault.refresh()
     assert vault.get_secrets() == {"tenant": ENV_AGENT}
     assert len(seen) == 2
+
+
+def test_vault_cache_evicts_least_recently_used_tenant(kv_env, monkeypatch):
+    monkeypatch.setenv("WRITER_TRUST_TENANT_HEADERS", "1")
+    monkeypatch.setattr(vault_module, "MAX_CACHED_TENANTS", 2)
+    storage, seen = _recording_storage()
+    monkeypatch.setattr(vault_module, "writer_kv_storage", storage)
+    vault = WriterVault()
+
+    def use(agent):
+        _use_session_headers(monkeypatch, {"x-agent-id": agent, "x-organization-id": "org"})
+        return vault.get_secrets()
+
+    use("a")
+    use("b")
+    use("a")
+    use("c")
+    assert len(seen) == 3
+
+    assert use("a") == {"tenant": "a"}
+    assert len(seen) == 3
+    assert use("b") == {"tenant": "b"}
+    assert len(seen) == 4
