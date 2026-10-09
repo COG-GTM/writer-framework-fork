@@ -108,7 +108,9 @@ async function exportProject() {
 	tracking.track("nav_export_clicked");
 
 	if (!exportInput.value) return;
-	const response = await fetch("./api/export");
+	const response = await fetch("./api/export", {
+		headers: { "X-Writer-Session-Id": wf.getSessionId() },
+	});
 	if (!response.ok) {
 		throw new Error("Failed to connect to export API");
 	}
@@ -142,6 +144,7 @@ async function importModalConfirm() {
 		// Send POST request
 		const response = await fetch("./api/import", {
 			method: "POST",
+			headers: { "X-Writer-Session-Id": wf.getSessionId() },
 			body: formData,
 		});
 		if (!response.ok) {
