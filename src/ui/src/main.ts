@@ -13,6 +13,7 @@ import { CollaborationManager } from "./writerTypes.js";
 import { useSecretsManager } from "./core/useSecretsManager.js";
 import { RECONNECT_DELAY_MS, MAX_RETRIES } from "@/constants/retry";
 import { useConfigJs } from "./composables/useConfigJs.js";
+import { VUE_DOMPURIFY_HTML_OPTIONS } from "./utils/sanitizeHtml";
 
 const wf = generateCore();
 
@@ -53,7 +54,7 @@ async function load() {
 		mode === "edit" && (await import("./builder/BuilderApp.vue"));
 
 	const app = createApp(componentRenderer || builderApp);
-	app.use(VueDOMPurifyHTML);
+	app.use(VueDOMPurifyHTML, VUE_DOMPURIFY_HTML_OPTIONS);
 	app.provide(injectionKeys.core, wf);
 	app.provide(injectionKeys.builderManager, wfbm);
 	app.provide(injectionKeys.notesManager, notesManager);
