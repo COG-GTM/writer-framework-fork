@@ -14,7 +14,7 @@ from tests.backend.fixtures.app_runner_fixtures import init_app_session
 class TestJournal:
     proposed_session_id = "c13a280fe17ec663047ec14de15cd93ad686fecf5f9a4dbf262d3a86de8cb577"
 
-    def test_api_entry(self, mock_kv_storage):
+    def test_api_entry(self, mock_kv_storage, private_api_headers):
         asgi_app = writer.serve.get_asgi_app(test_app_dir, "run")
         blueprint_id = "m4gycroojx6am4cq"
 
@@ -23,7 +23,7 @@ class TestJournal:
                 "POST",
                 f"/private/api/blueprint/{blueprint_id}",
                 json={"proposedSessionId": None},
-                headers={"Content-Type": "application/json"},
+                headers=private_api_headers,
             ) as response:
                 assert response.status_code == 200
 
@@ -77,7 +77,7 @@ class TestJournal:
             "result": "success",
         }
 
-    def test_cron_entry(self, mock_kv_storage):
+    def test_cron_entry(self, mock_kv_storage, private_api_headers):
         asgi_app = writer.serve.get_asgi_app(test_app_dir, "run")
         blueprint_id = "m4gycroojx6am4cq"
         branch_id = "3abex827umkt4tuo"
@@ -87,7 +87,7 @@ class TestJournal:
                 "POST",
                 f"/private/api/blueprint/{blueprint_id}?branch_id={branch_id}",
                 json={"proposedSessionId": None},
-                headers={"Content-Type": "application/json"},
+                headers=private_api_headers,
             ) as response:
                 assert response.status_code == 200
 

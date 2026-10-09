@@ -247,13 +247,13 @@ class TestServe:
                 "afterDeprecationCutoffAbv2",
             }
 
-    def test_get_cron_triggers_api(self):
+    def test_get_cron_triggers_api(self, private_api_headers):
         """
         Test that the cron triggers API endpoint returns a list of cron trigger blocks.
         """
         asgi_app = writer.serve.get_asgi_app(test_app_dir, "run")
         with fastapi.testclient.TestClient(asgi_app) as client:
-            res = client.get("/private/api/cron-triggers")
+            res = client.get("/private/api/cron-triggers", headers=private_api_headers)
             assert res.status_code == 200
             cron_triggers = res.json()
             assert isinstance(cron_triggers, list)
@@ -265,7 +265,7 @@ class TestServe:
                 assert "cron_expression" in trigger and trigger.get("cron_expression") is not None
                 assert "timezone" in trigger and trigger.get("timezone") is not None
 
-    def test_create_blueprint_job_api(self, monkeypatch):
+    def test_create_blueprint_job_api(self, monkeypatch, private_api_headers):
         asgi_app = writer.serve.get_asgi_app(test_app_dir, "run")
         monkeypatch.setenv("WRITER_SECRET_KEY", "abc")
         blueprint_id = "8ffkuce0ermsm9dr"
@@ -273,7 +273,7 @@ class TestServe:
         with fastapi.testclient.TestClient(asgi_app) as client:
             with client.stream("POST", f"/private/api/blueprint/{blueprint_id}",
                                 json={"proposedSessionId": None},
-                                headers={"Content-Type": "application/json"}) as response:
+                                headers=private_api_headers) as response:
 
                 assert response.status_code == 200
                 assert response.headers["content-type"] == "text/event-stream; charset=utf-8"
@@ -294,7 +294,7 @@ class TestServe:
                     assert "artifact" in final_payload
                     assert final_payload.get("artifact") == "987127"
 
-    def test_create_blueprint_job_api_error_handling(self, monkeypatch):
+    def test_create_blueprint_job_api_error_handling(self, monkeypatch, private_api_headers):
         asgi_app = writer.serve.get_asgi_app(test_app_dir, "run")
         monkeypatch.setenv("WRITER_SECRET_KEY", "abc")
 
@@ -302,7 +302,7 @@ class TestServe:
             with client.stream(
                 "POST", "/private/api/blueprint/nonexistent",
                 json={"proposedSessionId": None},
-                headers={"Content-Type": "application/json"}
+                headers=private_api_headers
             ) as response:
 
                 assert response.status_code == 200
@@ -315,7 +315,7 @@ class TestServe:
                 assert "msg" in final_payload
                 assert "not found" in final_payload["msg"].lower()
 
-    def test_create_blueprint_job_api_streaming_events(self, monkeypatch):
+    def test_create_blueprint_job_api_streaming_events(self, monkeypatch, private_api_headers):
         asgi_app = writer.serve.get_asgi_app(test_app_dir, "run")
         monkeypatch.setenv("WRITER_SECRET_KEY", "abc")
         blueprint_id = "8ffkuce0ermsm9dr"
@@ -324,7 +324,7 @@ class TestServe:
             with client.stream(
                 "POST", f"/private/api/blueprint/{blueprint_id}",
                 json={"proposedSessionId": None},
-                headers={"Content-Type": "application/json"}
+                headers=private_api_headers
             ) as response:
 
                 events = parse_sse_stream(response)
@@ -348,6 +348,90 @@ class TestServe:
                 if event_type == "error":
                     assert "msg" in final_payload
                     assert "finished_at" in final_payload
+
+    def _collect_blueprint_job_events(self, client, url, headers, json_body=None):
+        with client.stream("POST", url, json=json_body or {"proposedSessionId": None}, headers=headers) as response:
+            assert response.status_code == 200
+            assert "access-control-allow-origin" not in response.headers
+            return parse_sse_stream(response)
+
+    def test_private_api_disabled_without_configured_token(self, monkeypatch):
+        monkeypatch.delenv("WRITER_PRIVATE_API_TOKEN", raising=False)
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "run")
+        for client_addr in [("203.0.113.5", 50000), ("127.0.0.1", 50000)]:
+            with fastapi.testclient.TestClient(asgi_app, client=client_addr) as client:
+                assert client.get("/private/api/blueprints").status_code == 403
+                assert client.get("/private/api/cron-triggers").status_code == 403
+                res = client.post("/private/api/blueprint/8ffkuce0ermsm9dr", json={})
+                assert res.status_code == 403
+
+    def test_private_api_requires_matching_bearer_token(self, private_api_headers):
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "run")
+        with fastapi.testclient.TestClient(asgi_app, client=("127.0.0.1", 50000)) as client:
+            assert client.get("/private/api/blueprints").status_code == 401
+            res = client.get("/private/api/blueprints", headers={"Authorization": "Bearer wrong"})
+            assert res.status_code == 401
+            res = client.post(
+                "/private/api/blueprint/8ffkuce0ermsm9dr",
+                content=b"{}",
+                headers={"Content-Type": "application/json"},
+            )
+            assert res.status_code == 401
+            assert client.get("/private/api/blueprints", headers=private_api_headers).status_code == 200
+
+    def test_create_blueprint_job_requires_json_content_type(self, private_api_headers):
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "run")
+        headers = {**private_api_headers, "Content-Type": "text/plain"}
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            res = client.post("/private/api/blueprint/8ffkuce0ermsm9dr", content=b"{}", headers=headers)
+            assert res.status_code == 415
+            res = client.post("/private/api/blueprint/8ffkuce0ermsm9dr", content=b"[]", headers=private_api_headers)
+            assert res.status_code == 400
+
+    @pytest.mark.parametrize("blueprint_id,branch_id", [
+        ("m4gycroojx6am4cq", "pa448833kc2pis3a"),  # log message block
+        ("m4gycroojx6am4cq", "kiwqzy0ftd62y912"),  # UI event trigger
+        ("8ffkuce0ermsm9dr", "qfqpqmjdpzuu8fe9"),  # API trigger of another blueprint
+        ("m4gycroojx6am4cq", "does-not-exist"),
+    ])
+    def test_create_blueprint_job_rejects_non_trigger_branch(self, private_api_headers, blueprint_id, branch_id):
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "run")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            for url, body in (
+                (f"/private/api/blueprint/{blueprint_id}?branch_id={branch_id}", None),
+                (f"/private/api/blueprint/{blueprint_id}", {"branch_id": branch_id}),
+            ):
+                events = self._collect_blueprint_job_events(client, url, private_api_headers, body)
+                event_type, final_payload = events[-1]
+                assert event_type == "error"
+                assert "not an API or Cron trigger" in final_payload["msg"]
+                assert not any(e[0] == "status" and e[1].get("status") == "executing" for e in events)
+
+    def test_create_blueprint_job_body_cannot_override_validated_ids(self, private_api_headers):
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "run")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            res = client.post(
+                "/private/api/blueprint/m4gycroojx6am4cq?branch_id=3abex827umkt4tuo",
+                json={"branch_id": "pa448833kc2pis3a"},
+                headers=private_api_headers,
+            )
+            assert res.status_code == 400
+            res = client.post(
+                "/private/api/blueprint/8ffkuce0ermsm9dr",
+                json={"blueprint_id": "m4gycroojx6am4cq"},
+                headers=private_api_headers,
+            )
+            assert res.status_code == 400
+
+    def test_create_blueprint_job_rejects_non_blueprint_component_id(self, private_api_headers):
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "run")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            events = self._collect_blueprint_job_events(
+                client, "/private/api/blueprint/pa448833kc2pis3a", private_api_headers
+            )
+            event_type, final_payload = events[-1]
+            assert event_type == "error"
+            assert "not found" in final_payload["msg"].lower()
 
     def test_health_endpoint_returns_ok_when_all_processes_running_run_mode(self):
         """

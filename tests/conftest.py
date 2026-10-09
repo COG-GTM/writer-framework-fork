@@ -97,3 +97,15 @@ def mock_kv_storage(monkeypatch):
     storage = MockKeyValueStorage()
     monkeypatch.setattr(journal, "writer_kv_storage", storage)
     return storage
+
+
+PRIVATE_API_TOKEN = "test-private-api-token"
+
+
+@pytest.fixture
+def private_api_headers(monkeypatch):
+    monkeypatch.setenv("WRITER_PRIVATE_API_TOKEN", PRIVATE_API_TOKEN)
+    return {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {PRIVATE_API_TOKEN}",
+    }
