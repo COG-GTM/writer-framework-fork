@@ -105,6 +105,7 @@ import chroma, { Color } from "chroma-js";
 import BaseEmptiness from "../base/BaseEmptiness.vue";
 import BaseMarkdownRaw from "../base/BaseMarkdownRaw.vue";
 import { defineAsyncComponentWithLoader } from "@/utils/defineAsyncComponentWithLoader";
+import { escapeHtml } from "@/utils/html";
 
 const SharedCopyClipboardButton = defineAsyncComponentWithLoader({
 	loader: () => import("@/components/shared/SharedCopyClipboardButton.vue"),
@@ -156,10 +157,12 @@ function useMarkdownRenderer() {
 	function RawAnnotation(element: AnnotatedTextElementArray) {
 		const [content, subject] = element;
 		const subjectEl = subject
-			? `<span class="CoreAnnotatedText__annotation__subject">${subject}</span>`
+			? `<span class="CoreAnnotatedText__annotation__subject">${escapeHtml(subject)}</span>`
 			: "";
+		const bgColor = toCssColor(getAnnotationBgColor(element));
+		const style = bgColor ? ` style="background: ${bgColor}"` : "";
 
-		return `<span class="CoreAnnotatedText__annotation" style="background: ${getAnnotationBgColor(element)}">${content}${subjectEl}</span>`;
+		return `<span class="CoreAnnotatedText__annotation"${style}>${escapeHtml(content)}${subjectEl}</span>`;
 	}
 
 	async function parseMarkdown() {
@@ -213,13 +216,20 @@ function calculateColorStep(s: string, stepsLength = COLOR_STEPS.length) {
 	return step;
 }
 
+function toCssColor(color: unknown): string | undefined {
+	if (typeof color !== "string" || !chroma.valid(color)) return undefined;
+	return chroma(color).css();
+}
+
 function getAnnotationBgColor(content: AnnotatedTextElementArray) {
-	return content[2] || generateColor(content[1]);
+	const color = content[2];
+	if (typeof color === "string" && chroma.valid(color)) return color;
+	return generateColor(content[1]);
 }
 
 function generateColor(s: string) {
 	if (!fields.rotateHue.value) {
-		return fields.referenceColor.value;
+		return toCssColor(fields.referenceColor.value);
 	}
 
 	const baseColor = chroma(fields.referenceColor.value);
