@@ -12,8 +12,6 @@ from tests.backend.fixtures.app_runner_fixtures import init_app_session
 
 
 class TestJournal:
-    proposed_session_id = "c13a280fe17ec663047ec14de15cd93ad686fecf5f9a4dbf262d3a86de8cb577"
-
     def test_api_entry(self, mock_kv_storage):
         asgi_app = writer.serve.get_asgi_app(test_app_dir, "run")
         blueprint_id = "m4gycroojx6am4cq"
@@ -117,7 +115,7 @@ class TestJournal:
     async def test_ui_entry(self, setup_app_runner, mock_kv_storage):
         ar: AppRunner
         with setup_app_runner(test_app_dir, "edit", load=True) as ar:
-            await init_app_session(ar, session_id=self.proposed_session_id)
+            session_id = await init_app_session(ar)
 
             ev_req = EventRequest(
                 type="event",
@@ -135,7 +133,7 @@ class TestJournal:
                 ),
             )
 
-            await ar.dispatch_message(self.proposed_session_id, ev_req)
+            await ar.dispatch_message(session_id, ev_req)
             assert len(mock_kv_storage._data_storage) == 1
             entry = mock_kv_storage._data_storage.values()[0]
             assert entry == {
@@ -158,7 +156,7 @@ class TestJournal:
     async def test_ui_entry_return_value(self, setup_app_runner, mock_kv_storage):
         ar: AppRunner
         with setup_app_runner(test_app_dir, "run", load=True) as ar:
-            await init_app_session(ar, session_id=self.proposed_session_id)
+            session_id = await init_app_session(ar)
 
             ev_req = EventRequest(
                 type="event",
@@ -176,7 +174,7 @@ class TestJournal:
                 ),
             )
 
-            await ar.dispatch_message(self.proposed_session_id, ev_req)
+            await ar.dispatch_message(session_id, ev_req)
             assert len(mock_kv_storage._data_storage) == 1
             entry = mock_kv_storage._data_storage.values()[0]
             assert entry == {
@@ -199,7 +197,7 @@ class TestJournal:
     async def test_on_demand_branch(self, setup_app_runner, mock_kv_storage):
         ar: AppRunner
         with setup_app_runner(test_app_dir, "edit", load=True) as ar:
-            await init_app_session(ar, session_id=self.proposed_session_id)
+            session_id = await init_app_session(ar)
 
             ev_req = EventRequest(
                 type="event",
@@ -212,7 +210,7 @@ class TestJournal:
                 ),
             )
 
-            await ar.dispatch_message(self.proposed_session_id, ev_req)
+            await ar.dispatch_message(session_id, ev_req)
             assert len(mock_kv_storage._data_storage) == 1
             entry = mock_kv_storage._data_storage.values()[0]
             assert entry == {
@@ -235,7 +233,7 @@ class TestJournal:
     async def test_on_demand_blueprint(self, setup_app_runner, mock_kv_storage):
         ar: AppRunner
         with setup_app_runner(test_app_dir, "edit", load=True) as ar:
-            await init_app_session(ar, session_id=self.proposed_session_id)
+            session_id = await init_app_session(ar)
 
             ev_req = EventRequest(
                 type="event",
@@ -248,7 +246,7 @@ class TestJournal:
                 ),
             )
 
-            await ar.dispatch_message(self.proposed_session_id, ev_req)
+            await ar.dispatch_message(session_id, ev_req)
             assert len(mock_kv_storage._data_storage) == 1
             entry = mock_kv_storage._data_storage.values()[0]
             assert entry == {
@@ -275,7 +273,7 @@ class TestJournal:
     async def test_on_demand_blueprint_error(self, setup_app_runner, mock_kv_storage):
         ar: AppRunner
         with setup_app_runner(test_app_dir, "edit", load=True) as ar:
-            await init_app_session(ar, session_id=self.proposed_session_id)
+            session_id = await init_app_session(ar)
             ev_req = EventRequest(
                 type="event",
                 payload=WriterEvent(
@@ -287,7 +285,7 @@ class TestJournal:
                 ),
             )
 
-            await ar.dispatch_message(self.proposed_session_id, ev_req)
+            await ar.dispatch_message(session_id, ev_req)
             assert len(mock_kv_storage._data_storage) == 1
             entry = mock_kv_storage._data_storage.values()[0]
             assert entry == {

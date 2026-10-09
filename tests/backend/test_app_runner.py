@@ -73,12 +73,26 @@ class TestAppRunner:
 
     @pytest.mark.asyncio
     @pytest.mark.usefixtures("setup_app_runner")
+    async def test_init_should_not_create_session_with_client_chosen_id(self, setup_app_runner) -> None:
+        ar: AppRunner
+        with setup_app_runner(test_app_dir, "run", load=True) as ar:
+            session_id = await init_app_session(ar, session_id=self.proposed_session_id)
+
+            assert session_id != self.proposed_session_id
+            assert await ar.check_session(session_id) is True
+            assert await ar.check_session(self.proposed_session_id) is False
+
+            resumed_id = await init_app_session(ar, session_id=session_id)
+            assert resumed_id == session_id
+
+    @pytest.mark.asyncio
+    @pytest.mark.usefixtures("setup_app_runner")
     async def test_backend_ui_event_should_not_load_blueprint_component_in_run_mode(
         self, setup_app_runner
     ) -> None:
         ar: AppRunner
         with setup_app_runner(test_app_dir, "run", load=True) as ar:
-            await init_app_session(ar, session_id=self.proposed_session_id)
+            session_id = await init_app_session(ar)
 
             ev_req = EventRequest(
                 type="event",
@@ -108,7 +122,7 @@ class TestAppRunner:
                 ),
             )
 
-            rev = await ar.dispatch_message(self.proposed_session_id, ev_req)
+            rev = await ar.dispatch_message(session_id, ev_req)
             assert rev.payload.components.get("blueprints_root") is None
 
     @pytest.mark.asyncio
@@ -118,7 +132,7 @@ class TestAppRunner:
     ) -> None:
         ar: AppRunner
         with setup_app_runner(test_app_dir, "edit", load=True) as ar:
-            await init_app_session(ar, session_id=self.proposed_session_id)
+            session_id = await init_app_session(ar)
 
             ev_req = EventRequest(
                 type="event",
@@ -148,7 +162,7 @@ class TestAppRunner:
                 ),
             )
 
-            rev = await ar.dispatch_message(self.proposed_session_id, ev_req)
+            rev = await ar.dispatch_message(session_id, ev_req)
             assert rev.payload.components.get("blueprints_root") is not None
 
     @pytest.mark.asyncio
@@ -170,7 +184,7 @@ class TestAppRunner:
     @pytest.mark.usefixtures("setup_app_runner")
     async def test_valid_session_invalid_event(self, setup_app_runner) -> None:
         with setup_app_runner(test_app_dir, "run", load=True) as ar:
-            await init_app_session(ar, session_id=self.proposed_session_id)
+            await init_app_session(ar)
             er = EventRequest(
                 type="event",
                 payload=WriterEvent(
@@ -186,7 +200,7 @@ class TestAppRunner:
     @pytest.mark.usefixtures("setup_app_runner")
     async def test_valid_event(self, setup_app_runner) -> None:
         with setup_app_runner(test_app_dir, "run", load=True) as ar:
-            await init_app_session(ar, session_id=self.proposed_session_id)
+            session_id = await init_app_session(ar)
             ev_req = EventRequest(
                 type="event",
                 payload=WriterEvent(
@@ -195,7 +209,7 @@ class TestAppRunner:
                     payload="129673",
                 ),
             )
-            ev_res = await ar.dispatch_message(self.proposed_session_id, ev_req)
+            ev_res = await ar.dispatch_message(session_id, ev_req)
             assert ev_res.status == "ok"
             assert ev_res.payload.result.get("ok")
             assert ev_res.payload.mutations.get("+inspected_payload") == "129673.0"
@@ -205,7 +219,7 @@ class TestAppRunner:
     @pytest.mark.usefixtures("setup_app_runner")
     async def test_async_handler(self, setup_app_runner) -> None:
         with setup_app_runner(test_app_dir, "run", load=True) as ar:
-            await init_app_session(ar, session_id=self.proposed_session_id)
+            session_id = await init_app_session(ar)
             # Firing an event to bypass "initial" state mutations
             ev_req = EventRequest(
                 type="event",
@@ -215,13 +229,13 @@ class TestAppRunner:
                     payload="129673",
                 ),
             )
-            ev_res = await ar.dispatch_message(self.proposed_session_id, ev_req)
+            ev_res = await ar.dispatch_message(session_id, ev_req)
 
             ev_req = EventRequest(
                 type="event",
                 payload=WriterEvent(type="wf-click", instancePath=self.async_handler_click_path),
             )
-            ev_res = await ar.dispatch_message(self.proposed_session_id, ev_req)
+            ev_res = await ar.dispatch_message(session_id, ev_req)
             assert ev_res.status == "ok"
             assert ev_res.payload.result.get("ok")
             assert "+counter" in ev_res.payload.mutations
@@ -230,7 +244,7 @@ class TestAppRunner:
     @pytest.mark.usefixtures("setup_app_runner")
     async def test_bad_event_handler(self, setup_app_runner) -> None:
         with setup_app_runner(test_app_dir, "run", load=True) as ar:
-            await init_app_session(ar, session_id=self.proposed_session_id)
+            session_id = await init_app_session(ar)
             bad_button_instance_path = [
                 {"componentId": "root", "instanceNumber": 0},
                 {"componentId": "28a2212b-bc58-4398-8a72-2554e5296490", "instanceNumber": 0},
@@ -242,7 +256,7 @@ class TestAppRunner:
                     type="click", instancePath=bad_button_instance_path, payload={}
                 ),
             )
-            ev_res = await ar.dispatch_message(self.proposed_session_id, ev_req)
+            ev_res = await ar.dispatch_message(session_id, ev_req)
             print(repr(ev_res))
             assert ev_res.status == "ok"
             assert not ev_res.payload.result.get("ok")
@@ -251,14 +265,14 @@ class TestAppRunner:
     @pytest.mark.usefixtures("setup_app_runner")
     async def test_unsafe_event(self, setup_app_runner) -> None:
         with setup_app_runner(test_app_dir, "run", load=True) as ar:
-            await init_app_session(ar, session_id=self.proposed_session_id)
+            session_id = await init_app_session(ar)
             ev_req = EventRequest(
                 type="event",
                 payload=WriterEvent(
                     type="wf-built-run", handler="nineninenine", instancePath=None, payload=None
                 ),
             )
-            ev_res = await ar.dispatch_message(self.proposed_session_id, ev_req)
+            ev_res = await ar.dispatch_message(session_id, ev_req)
             assert ev_res.status == "ok"
             assert not ev_res.payload.result.get("ok")
 
@@ -266,7 +280,7 @@ class TestAppRunner:
     @pytest.mark.usefixtures("setup_app_runner")
     async def test_safe_global_event(self, setup_app_runner) -> None:
         with setup_app_runner(test_app_dir, "run", load=True) as ar:
-            await init_app_session(ar, session_id=self.proposed_session_id)
+            session_id = await init_app_session(ar)
             ev_req = EventRequest(
                 type="event",
                 payload=WriterEvent(
@@ -277,7 +291,7 @@ class TestAppRunner:
                     payload=None,
                 ),
             )
-            ev_res = await ar.dispatch_message(self.proposed_session_id, ev_req)
+            ev_res = await ar.dispatch_message(session_id, ev_req)
             assert ev_res.status == "ok"
             assert ev_res.payload.result.get("result") == 999
 

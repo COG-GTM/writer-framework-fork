@@ -1672,6 +1672,7 @@ class SessionManager:
     def __init__(self) -> None:
         self.sessions: Dict[str, WriterSession] = {}
         self.verifiers: List[Callable] = []
+        self.issued_session_ids: Set[str] = set()
 
     def add_verifier(self, verifier: Callable) -> None:
         self.verifiers.append(verifier)
@@ -1703,21 +1704,33 @@ class SessionManager:
             return True
         return False
 
+    def issue_session_id(self) -> str:
+        """
+        Generates a session id that a later `get_new_session` call may use, once, as `proposed_session_id`.
+        """
+        session_id = self._generate_session_id()
+        self.issued_session_ids.add(session_id)
+        return session_id
+
     def get_new_session(
         self,
         cookies: Optional[Dict] = None,
         headers: Optional[Dict] = None,
         proposed_session_id: Optional[str] = None,
     ) -> Optional[WriterSession]:
+        """
+        Creates a session. Its id is generated server-side; a client-proposed id is only
+        honoured if it was issued by `issue_session_id`, so clients cannot choose session ids.
+        """
         if not self._check_proposed_session_id(proposed_session_id):
             return None
         if not self._verify_before_new_session(cookies, headers):
             return None
-        new_id = None
-        if proposed_session_id is None:
-            new_id = self._generate_session_id()
-        else:
+        if proposed_session_id is not None and proposed_session_id in self.issued_session_ids:
+            self.issued_session_ids.discard(proposed_session_id)
             new_id = proposed_session_id
+        else:
+            new_id = self._generate_session_id()
         new_session = WriterSession(new_id, cookies, headers)
         self.sessions[new_id] = new_session
         return new_session
@@ -1741,6 +1754,7 @@ class SessionManager:
 
     def clear_all(self) -> None:
         self.sessions = {}
+        self.issued_session_ids = set()
 
     def close_session(self, session_id: str) -> None:
         if session_id not in self.sessions:

@@ -1096,16 +1096,29 @@ class TestSessionManager:
     sm = SessionManager()
     proposed_session_id = "c13a280fe17ec663047ec14de15cd93ad686fecf5f9a4dbf262d3a86de8cb577"
 
-    def test_get_new_session_proposed(self) -> None:
-        self.sm.get_new_session(
+    def test_get_new_session_ignores_unissued_proposed_id(self) -> None:
+        s = self.sm.get_new_session(
             {"testCookie": "yes"}, {"origin": "example.com"}, self.proposed_session_id
         )
-        self.sm.get_session(self.proposed_session_id)
-        s = self.sm.get_session(self.proposed_session_id)
+        assert s.session_id != self.proposed_session_id
+        assert SessionManager.hex_pattern.match(s.session_id)
+        assert self.sm.get_session(self.proposed_session_id) is None
+        assert self.sm.get_session(s.session_id) == s
+
+    def test_get_new_session_rejects_malformed_proposed_id(self) -> None:
+        assert self.sm.get_new_session({}, {}, "not-a-session-id") is None
+
+    def test_get_new_session_accepts_issued_id_once(self) -> None:
+        issued_id = self.sm.issue_session_id()
+        s = self.sm.get_new_session({"testCookie": "yes"}, {"origin": "example.com"}, issued_id)
+        assert s.session_id == issued_id
         assert s.cookies == {"testCookie": "yes"}
         assert s.headers == {"origin": "example.com"}
-        assert s.session_id == self.proposed_session_id
-        assert self.sm.get_session(self.proposed_session_id) == s
+        assert self.sm.get_session(issued_id) == s
+
+        self.sm.close_session(issued_id)
+        replayed = self.sm.get_new_session({}, {}, issued_id)
+        assert replayed.session_id != issued_id
 
     def test_get_new_session_generate_id(self) -> None:
         s = self.sm.get_new_session({"testCookie": "yes"}, {"origin": "example.com"}, None)
