@@ -137,7 +137,8 @@ class BasicAuth(Auth):
     The client IP is the address of the TCP peer (`request.client.host`). When uvicorn runs with `--proxy-headers`
     (the default), it already rewrites the peer from `X-Forwarded-For` for the proxies listed in `--forwarded-allow-ips`.
     `X-Forwarded-For` / `X-Real-IP` are only read by Writer Framework when the peer is listed in `trusted_proxies`
-    (IP addresses or CIDR ranges); otherwise they are ignored, because any client can set them.
+    (IP addresses or CIDR ranges); otherwise they are ignored, because any client can set them. List only the
+    proxies themselves: any peer in `trusted_proxies` can choose the IP it is throttled under.
 
     >>> _auth = auth.BasicAuth(
     >>>     login=os.getenv('LOGIN'),
