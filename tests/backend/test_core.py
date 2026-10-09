@@ -4,6 +4,7 @@ import typing
 import unittest
 import urllib
 from typing import Any, Dict
+from unittest import mock
 
 import altair
 import numpy as np
@@ -865,6 +866,82 @@ class TestEventDeserialiser:
         assert ev.payload[0].get("name") == "myfile.txt"
         assert ev.payload[0].get("type") == "text/plain"
         assert bytes(ev.payload[0].get("data")).decode("utf-8") == "hello world"
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "file:///etc/passwd",
+            "FILE:///proc/self/environ",
+            "http://169.254.169.254/latest/meta-data/",
+            "https://example.com/",
+            "ftp://example.com/x",
+            "/etc/passwd",
+            " data:text/plain;base64,aGVsbG8gd29ybGQ=",
+            "data:text/plain;base64",
+            "data:text/plain;base64,not*base64",
+            123,
+        ],
+    )
+    def test_webcam_rejects_non_data_urls(self, url) -> None:
+        ev = WriterEvent(type="wf-webcam", instancePath=self.root_instance_path, payload=url)
+        with mock.patch("urllib.request.urlopen") as urlopen, pytest.raises(RuntimeError):
+            self.ed.transform(ev)
+        urlopen.assert_not_called()
+        assert ev.payload == {}
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "file:///proc/self/environ",
+            "http://127.0.0.1:22/",
+            "https://example.com/",
+            "data:text/plain;base64,%%%",
+        ],
+    )
+    def test_file_change_rejects_non_data_urls(self, url) -> None:
+        ev = WriterEvent(
+            type="wf-file-change",
+            instancePath=self.root_instance_path,
+            payload=[
+                {"name": "ok.txt", "type": "text/plain", "data": "data:text/plain;base64,aGk="},
+                {"name": "x", "type": "text/plain", "data": url},
+            ],
+        )
+        with mock.patch("urllib.request.urlopen") as urlopen, pytest.raises(RuntimeError):
+            self.ed.transform(ev)
+        urlopen.assert_not_called()
+        assert ev.payload == {}
+
+    def test_file_change_rejects_malformed_payload(self) -> None:
+        for payload in [
+            {"name": "x", "type": "text/plain", "data": "data:,hi"},
+            ["data:,hi"],
+            [{"name": 1, "type": "text/plain", "data": "data:,hi"}],
+        ]:
+            ev = WriterEvent(
+                type="wf-file-change", instancePath=self.root_instance_path, payload=payload
+            )
+            with pytest.raises(RuntimeError):
+                self.ed.transform(ev)
+
+    def test_data_url_decoding(self) -> None:
+        decode = EventDeserialiser._decode_data_url
+        assert decode("data:,hello%20world") == b"hello world"
+        assert decode("DATA:image/png;BASE64,aGk=") == b"hi"
+        assert decode("data:;base64,") == b""
+
+    def test_data_url_size_limit(self) -> None:
+        with mock.patch.object(EventDeserialiser, "MAX_DATA_URL_BYTES", 4):
+            ev = WriterEvent(
+                type="wf-webcam",
+                instancePath=self.root_instance_path,
+                payload="data:text/plain;base64,aGVsbG8gd29ybGQ=",
+            )
+            with pytest.raises(RuntimeError):
+                self.ed.transform(ev)
+            assert EventDeserialiser._decode_data_url("data:;base64,aGk=") == b"hi"
+            with pytest.raises(ValueError):
+                EventDeserialiser._decode_data_url("data:,hello")
 
     def test_date_change(self) -> None:
         ev_invalid = WriterEvent(

@@ -16,7 +16,7 @@ import secrets
 import time
 import traceback
 import typing
-import urllib.request
+import urllib.parse
 from contextvars import ContextVar
 from multiprocessing.process import BaseProcess
 from types import ModuleType
@@ -1552,21 +1552,53 @@ class EventDeserialiser:
     def _transform_number_change_finish(self, ev) -> Optional[float]:
         return self._transform_number_change(ev)
 
-    def _transform_webcam(self, ev) -> Any:
-        return urllib.request.urlopen(ev.payload).read()
+    MAX_DATA_URL_BYTES = 200 * 1024 * 1024
+
+    @classmethod
+    def _decode_data_url(cls, value: Any) -> bytes:
+        """Decodes a client-supplied `data:` URL without fetching anything.
+
+        Client payloads must never reach `urllib.request.urlopen`, which would
+        also honour `file:`, `http(s):` and `ftp:` URLs."""
+
+        if not isinstance(value, str) or not value[:5].lower() == "data:":
+            raise ValueError("Only data: URLs are accepted.")
+        header, sep, encoded = value[5:].partition(",")
+        if not sep:
+            raise ValueError("Malformed data: URL.")
+        if len(encoded) > cls.MAX_DATA_URL_BYTES * 4 // 3 + 4:
+            raise ValueError("Data exceeds maximum size.")
+        if header.lower().endswith(";base64"):
+            data = base64.b64decode(encoded, validate=True)
+        else:
+            data = urllib.parse.unquote_to_bytes(encoded)
+        if len(data) > cls.MAX_DATA_URL_BYTES:
+            raise ValueError("Data exceeds maximum size.")
+        return data
+
+    def _transform_webcam(self, ev) -> bytes:
+        return self._decode_data_url(ev.payload)
 
     def _file_item_transform(self, file_item: WriterFileItem) -> Dict:
+        if not isinstance(file_item, dict):
+            raise ValueError("Invalid file item.")
         data = file_item.get("data")
         if data is None:
             raise ValueError("No data provided.")
+        name = file_item.get("name")
+        mime_type = file_item.get("type")
+        if not isinstance(name, str) or not isinstance(mime_type, str):
+            raise ValueError("Invalid file item.")
         return {
-            "name": file_item.get("name"),
-            "type": file_item.get("type"),
-            "data": urllib.request.urlopen(data).read(),
+            "name": name,
+            "type": mime_type,
+            "data": self._decode_data_url(data),
         }
 
     def _transform_file_change(self, ev) -> List[Dict]:
         payload = ev.payload
+        if not isinstance(payload, list):
+            raise ValueError("Invalid file change payload. Expected a list.")
         tf_payload = list(map(self._file_item_transform, payload))
 
         return tf_payload
