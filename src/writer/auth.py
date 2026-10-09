@@ -181,7 +181,24 @@ class Oidc(Auth):
     authlib: OAuth2Session = None
     callback_func: Optional[Callable[[Request, str, dict], None]] = None # Callback to validate user authentication
     unauthorized_action: Optional[Callable[[Request, Unauthorized], Response]] = None # Callback to build its own page when a user is not allowed
+    session_cookie_max_age: int = 3600 # Lifetime in seconds of the session cookie issued after a successful login
+    _authenticated_sessions: Dict[str, float] = dataclasses.field(default_factory=dict, init=False, repr=False)
 
+    def _is_authenticated_session(self, session_id: Optional[str]) -> bool:
+        """
+        Only session ids issued by the OIDC callback after a successful login, and not expired, are accepted.
+        """
+        if session_id is None:
+            return False
+        issued_at = self._authenticated_sessions.get(session_id)
+        return issued_at is not None and time.time() - issued_at < self.session_cookie_max_age
+
+    def _add_authenticated_session(self, session_id: str) -> None:
+        now = time.time()
+        expired = [sid for sid, issued_at in self._authenticated_sessions.items() if now - issued_at >= self.session_cookie_max_age]
+        for sid in expired:
+            del self._authenticated_sessions[sid]
+        self._authenticated_sessions[session_id] = now
 
     def register(self,
                  asgi_app: WriterFastAPI,
@@ -228,7 +245,7 @@ class Oidc(Auth):
             session = request.cookies.get('session')
 
             is_one_of_url_prefix_allowed = any(request.url.path.startswith(url_prefix) for url_prefix in auth_authorized_prefix_paths)
-            if session is not None or request.url.path in auth_authorized_routes or is_one_of_url_prefix_allowed:
+            if self._is_authenticated_session(session) or request.url.path in auth_authorized_routes or is_one_of_url_prefix_allowed:
                 response: Response = await call_next(request)
                 return response
             else:
@@ -258,7 +275,8 @@ class Oidc(Auth):
                 if self.url_userinfo:
                     app_runner.set_userinfo(session_id=session_id, userinfo=userinfo)
 
-                response.set_cookie(key="session", value=session_id, httponly=True)
+                self._add_authenticated_session(session_id)
+                response.set_cookie(key="session", value=session_id, httponly=True, max_age=self.session_cookie_max_age)
                 return response
             except Unauthorized as exc:
                 if self.unauthorized_action is not None:
