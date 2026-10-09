@@ -3,7 +3,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, toRef, watch } from "vue";
+import { onMounted, ref, toRef, watch } from "vue";
 import { createElement, icons } from "lucide";
 
 defineOptions({
@@ -47,14 +47,13 @@ function renderIcon(name: string) {
 	);
 }
 
+onMounted(() => renderIcon(props.name));
+
 watch(
 	toRef(props, "name"),
 	(newName) => {
 		renderIcon(newName);
 	},
-	{
-		immediate: true,
-		flush: "post",
-	},
+	{ flush: "post" },
 );
 </script>
