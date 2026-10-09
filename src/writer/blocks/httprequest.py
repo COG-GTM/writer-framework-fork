@@ -2,7 +2,7 @@ import json
 
 from writer.abstract import register_abstract_template
 from writer.blocks.base_block import BlueprintBlock
-from writer.blocks.redaction import redact_headers, redact_text
+from writer.blocks.redaction import redact_body, redact_headers, redact_url
 from writer.ss_types import AbstractTemplate
 
 
@@ -112,9 +112,9 @@ class HTTPRequest(BlueprintBlock):
                 secrets = self._get_secret_values()
                 self.result = {
                     "request": {
-                        "url": redact_text(str(res.request.url), secrets),
+                        "url": redact_url(str(res.request.url), secrets),
                         "headers": redact_headers(res.request.headers, secrets),
-                        "body": redact_text(
+                        "body": redact_body(
                             res.request.content.decode("utf-8", errors="replace"), secrets
                         ),
                     },
