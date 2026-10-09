@@ -5,8 +5,8 @@ Helpers for keeping resolved secrets out of block results and request logs.
 import json
 import os
 import re
-from typing import Any, Iterable, List, Mapping, Optional, Set
-from urllib.parse import quote, quote_plus
+from typing import Any, Callable, Iterable, List, Mapping, Optional, Set
+from urllib.parse import quote, quote_plus, unquote, unquote_plus
 
 REDACTED = "[REDACTED]"
 
@@ -53,14 +53,21 @@ def _collect_strings(value: Any, into: Set[str]) -> None:
         into.add(str(value))
 
 
+def _env_lookup(expr: str) -> Any:
+    return os.getenv(expr[1:])
+
+
 def collect_secret_values(
-    vault: Optional[Any] = None, field_templates: Iterable[Any] = ()
+    vault: Optional[Any] = None,
+    field_templates: Iterable[Any] = (),
+    resolve: Callable[[str], Any] = _env_lookup,
 ) -> List[str]:
     """
     Returns the plaintext values that must never be echoed: every vault
-    secret, plus every environment variable referenced as ``@{$NAME}`` in
-    the given raw field templates. Longest first, so overlapping secrets are
-    replaced whole.
+    secret, plus the resolved value of every ``@{$NAME}`` / ``@{vault.*}``
+    expression in the given raw field templates. ``resolve`` evaluates an
+    expression the same way the block does. Longest first, so overlapping
+    secrets are replaced whole.
     """
     secrets: Set[str] = set()
     if vault:
@@ -70,10 +77,14 @@ def collect_secret_values(
             continue
         for match in _TEMPLATE_REGEX.finditer(template):
             expr = match.group(1).strip()
-            if expr.startswith("$"):
-                env_value = os.getenv(expr[1:])
-                if env_value:
-                    secrets.add(env_value)
+            if not (expr.startswith("$") or expr.startswith("vault.")):
+                continue
+            try:
+                value = resolve(expr)
+            except Exception:
+                value = _env_lookup(expr) if expr.startswith("$") else None
+            if value is not None:
+                _collect_strings(value, secrets)
     return sorted((s for s in secrets if len(s) >= MIN_SECRET_LENGTH), key=len, reverse=True)
 
 
@@ -106,3 +117,52 @@ def redact_headers(headers: Mapping[str, Any], secrets: Iterable[str] = ()) -> d
         else:
             redacted[name] = redact_text(str(value), secrets) or ""
     return redacted
+
+
+def redact_url(url: str, secrets: Iterable[str]) -> str:
+    """
+    Redacts secrets from a URL regardless of how they were percent-encoded
+    (mixed, lowercase or ``+`` for spaces). The URL is returned decoded only
+    when a secret is found that way.
+    """
+    secrets = list(secrets)
+    redacted = redact_text(url, secrets) or ""
+    for decode in (unquote, unquote_plus):
+        decoded = decode(redacted)
+        cleaned = redact_text(decoded, secrets)
+        if cleaned != decoded:
+            return cleaned or ""
+    return redacted
+
+
+def _redact_json_value(value: Any, secrets: List[str]) -> Any:
+    if isinstance(value, dict):
+        return {redact_text(k, secrets): _redact_json_value(v, secrets) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_json_value(v, secrets) for v in value]
+    if isinstance(value, str):
+        return redact_text(value, secrets)
+    if value is not None and json.dumps(value) in secrets:
+        return REDACTED
+    return value
+
+
+def redact_body(text: Optional[str], secrets: Iterable[str]) -> Optional[str]:
+    """
+    Like ``redact_text``, but keeps JSON bodies valid JSON: values are
+    redacted structurally, so a secret matching a literal (``true``, ``1234``)
+    becomes the string marker instead of breaking the document.
+    """
+    secrets = list(secrets)
+    if not text or not secrets:
+        return text
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return redact_text(text, secrets)
+    if not isinstance(parsed, (dict, list)):
+        return redact_text(text, secrets)
+    redacted = _redact_json_value(parsed, secrets)
+    if redacted == parsed:
+        return text
+    return json.dumps(redacted)

@@ -134,7 +134,7 @@ def _echo_handler(request: httpx.Request) -> httpx.Response:
             "Set-Cookie": "session=abc123",
             "X-Echo": request.headers.get("X-Custom", ""),
         },
-        json={"ok": True},
+        json={"ok": True, "echo": request.headers.get("X-Custom", "")},
     )
 
 
@@ -177,14 +177,16 @@ def test_request_secrets_are_redacted_from_result_and_logs(session, runner, monk
     assert json.loads(request["body"]) == {"token": "[REDACTED]", "name": "duck"}
     assert block.result["headers"]["set-cookie"] == "[REDACTED]"
     assert block.result["headers"]["x-echo"] == "prefix-[REDACTED]"
-    assert block.result["body"] == {"ok": True}
+    assert block.result["body"]["ok"] is True
 
     logged = json.dumps(block.execution_environment["httpx_requests"])
-    serialized_result = json.dumps(block.result)
+    serialized_result = json.dumps({k: v for k, v in block.result.items() if k != "body"})
     for leaked in (VAULT_SECRET, ENV_SECRET, "session=abc123"):
         assert leaked not in serialized_result
         assert leaked not in logged
     assert "vault-s3cr3t%2Fvalue%2B1" not in serialized_result + logged
+    logged_response = block.execution_environment["httpx_requests"][-1]["response"]
+    assert json.loads(logged_response["content"])["echo"] == "prefix-[REDACTED]"
 
 
 def test_request_without_secrets_is_unchanged(session, runner, monkeypatch):
