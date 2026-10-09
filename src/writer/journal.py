@@ -2,6 +2,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 from contextvars import ContextVar
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -37,6 +38,11 @@ _SENSITIVE_KEYS = {
 }
 _SENSITIVE_KEY_SUFFIXES = ("apikey", "token", "secret", "password")
 _MIN_MASKED_SECRET_LENGTH = 4
+_SENSITIVE_HEADER_LINE_RE = re.compile(r"(?im)^(\s*(?:proxy-)?authorization|\s*(?:set-)?cookie)(\s*:\s*).+$")
+_SENSITIVE_ASSIGNMENT_RE = re.compile(
+    r"""(?i)((?:authorization|cookie|passwd|credentials|private[_-]?key|[\w-]*(?:api[_-]?key|token|secret|password))["']?\s*[:=]\s*["']?)((?:bearer|basic)\s+)?([^"'&\s,;}]+)"""
+)
+_BEARER_RE = re.compile(r"(?i)\b(bearer|basic)\s+(?!\[REDACTED\])[A-Za-z0-9._~+/=-]+")
 
 
 def is_journal_key(key: str) -> bool:
@@ -77,6 +83,12 @@ def mask_secret_values(text: str, secret_values: Sequence[str]) -> str:
         if secret in text:
             text = text.replace(secret, REDACTED)
     return text
+
+
+def redact_sensitive_text(text: str) -> str:
+    text = _SENSITIVE_HEADER_LINE_RE.sub(lambda m: m.group(1) + m.group(2) + REDACTED, text)
+    text = _SENSITIVE_ASSIGNMENT_RE.sub(lambda m: m.group(1) + (m.group(2) or "") + REDACTED, text)
+    return _BEARER_RE.sub(lambda m: f"{m.group(1)} {REDACTED}", text)
 
 
 def should_record_payloads() -> bool:
@@ -194,7 +206,8 @@ class JournalRecord:
 
     def get_execution_data(self, graph_node: "GraphNode") -> Dict[str, Any]:
         result = graph_node.result
-        if graph_node.outcome == "trigger" and not should_record_payloads():
+        is_payload_result = bool(self.execution_environment.get("payload"))
+        if graph_node.outcome == "trigger" and is_payload_result and not should_record_payloads():
             result = OMITTED_PAYLOAD
         execution_data: Dict[str, Any] = {
             "result": result,
@@ -232,7 +245,7 @@ class JournalRecord:
                 for k, v in data.items()
             }
         if isinstance(data, str):
-            return mask_secret_values(data, secret_values)
+            return self._sanitize_string(data, secret_values)
         if isinstance(data, (int, float, bool)):
             return data
 
@@ -242,6 +255,17 @@ class JournalRecord:
             self.is_runable = False
             return f"Can't be displayed in the Journal. Value of type: {str(type(data))}."
         return self._sanitize_data(serializable, secret_values)
+
+    def _sanitize_string(self, text: str, secret_values: Sequence[str]) -> str:
+        text = mask_secret_values(text, secret_values)
+        if text.lstrip().startswith(("{", "[")):
+            try:
+                parsed = json.loads(text)
+            except ValueError:
+                parsed = None
+            if isinstance(parsed, (dict, list)):
+                return json.dumps(self._sanitize_data(parsed, secret_values))
+        return redact_sensitive_text(text)
 
     def construct_key(self) -> str:
         return f"{JOURNAL_KEY_PREFIX}{self.instance_type[0]}-{int(self.started_at.timestamp() * 1000)}"

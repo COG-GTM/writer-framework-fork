@@ -509,7 +509,12 @@ class AppProcess(multiprocessing.Process):
         from datetime import datetime, timezone
 
         from writer.core import Config
-        from writer.journal import INIT_LOGS_KEY_PREFIX, get_vault_secret_values, mask_secret_values
+        from writer.journal import (
+            INIT_LOGS_KEY_PREFIX,
+            get_vault_secret_values,
+            mask_secret_values,
+            redact_sensitive_text,
+        )
         from writer.keyvalue_storage import writer_kv_storage
         
         if "journal" not in Config.feature_flags or not writer_kv_storage.is_accessible():
@@ -522,8 +527,8 @@ class AppProcess(multiprocessing.Process):
         
         key = f"{INIT_LOGS_KEY_PREFIX}{instance_type_letter}-{int(timestamp.timestamp() * 1000)}"
         secret_values = get_vault_secret_values()
-        stdout = mask_secret_values(stdout, secret_values)
-        logs = mask_secret_values(logs, secret_values)
+        stdout = redact_sensitive_text(mask_secret_values(stdout, secret_values))
+        logs = redact_sensitive_text(mask_secret_values(logs, secret_values))
         data = {
             "timestamp": timestamp.isoformat(),
             "instanceType": instance_type,

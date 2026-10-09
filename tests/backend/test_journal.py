@@ -1,8 +1,10 @@
+import json
 from unittest.mock import ANY
 
 import fastapi
 import fastapi.testclient
 import pytest
+import writer.core
 import writer.keyvalue_storage
 import writer.serve
 import writer.vault
@@ -391,6 +393,38 @@ class TestJournalRedaction:
             "x-custom": f"Token {journal.REDACTED}",
             "note": "ab stays",
         }
+
+    def test_serialized_and_plain_text_credentials_are_redacted(self):
+        data = {
+            "body": '{"user": "bob", "password": "pw-1", "nested": {"access_token": "tok-1"}}',
+            "request_body": "grant_type=client_credentials&client_secret=cs-1&scope=read",
+            "stdout": "Authorization: Bearer abc.def.ghi\napi_key='k-1' max_tokens=100",
+        }
+
+        sanitized = self._record()._sanitize_data(data)
+
+        assert json.loads(sanitized["body"]) == {
+            "user": "bob",
+            "password": journal.REDACTED,
+            "nested": {"access_token": journal.REDACTED},
+        }
+        assert sanitized["request_body"] == f"grant_type=client_credentials&client_secret={journal.REDACTED}&scope=read"
+        assert "abc.def.ghi" not in sanitized["stdout"]
+        assert "k-1" not in sanitized["stdout"]
+        assert "max_tokens=100" in sanitized["stdout"]
+
+    def test_run_mode_keeps_trigger_default_result_when_payload_empty(self, monkeypatch):
+        monkeypatch.delenv(journal.RECORD_PAYLOADS_ENV_VAR, raising=False)
+        monkeypatch.setattr(writer.core.Config, "mode", "run")
+        node = type("Node", (), {"result": {"region": "east"}, "outcome": "trigger", "tool": None})()
+
+        empty_payload = self._record()
+        empty_payload.execution_environment = {"payload": {}}
+        assert empty_payload.get_execution_data(node)["result"] == {"region": "east"}
+
+        with_payload = self._record()
+        with_payload.execution_environment = {"payload": {"region": "west"}}
+        assert with_payload.get_execution_data(node)["result"] == journal.OMITTED_PAYLOAD
 
     def test_non_json_values_are_sanitized_after_serialization(self):
         sanitized = self._record()._sanitize_data({"pair": ("a", {"token": "t"})})
