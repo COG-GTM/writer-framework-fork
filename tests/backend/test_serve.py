@@ -8,6 +8,7 @@ import pytest
 import writer.abstract
 import writer.serve
 from fastapi import FastAPI
+from writer.ss_types import EventResponse, EventResponsePayload
 
 from tests.backend import test_app_dir, test_multiapp_dir
 
@@ -406,3 +407,122 @@ class TestServe:
             response_json = res.json()
             assert response_json["status"] == "error"
             assert "Project saver process is not running" in response_json["message"]
+
+    def _init_session(self, client, origin=None):
+        headers = {"Content-Type": "application/json"}
+        if origin:
+            headers["Origin"] = origin
+        res = client.post("/api/init", json={"proposedSessionId": None}, headers=headers)
+        assert res.status_code == 200
+        return res
+
+    def test_server_setup_error_traceback_is_not_sent_in_run_mode(self, monkeypatch):
+        def failing_hook(user_app_path):
+            raise RuntimeError("db password is hunter2")
+
+        sent_mail = []
+        original_init_session = writer.serve.AppRunner.init_session
+
+        async def capturing_init_session(self, payload):
+            sent_mail.extend(m.model_dump() for m in payload.additionalMail)
+            return await original_init_session(self, payload)
+
+        monkeypatch.setattr(writer.serve, "_execute_server_setup_hook", failing_hook)
+        monkeypatch.setattr(writer.serve.AppRunner, "init_session", capturing_init_session)
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "run")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            res = self._init_session(client)
+            assert "hunter2" not in res.text
+            assert "Traceback" not in res.text
+
+        assert len(sent_mail) == 1
+        assert sent_mail[0]["title"] == "Custom server setup error"
+        assert sent_mail[0]["code"] is None
+        assert "hunter2" not in json.dumps(sent_mail)
+
+    def test_server_setup_error_traceback_is_sent_in_edit_mode(self, monkeypatch):
+        def failing_hook(user_app_path):
+            raise RuntimeError("server setup exploded")
+
+        monkeypatch.setattr(writer.serve, "_execute_server_setup_hook", failing_hook)
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "edit")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            res = self._init_session(client, origin="http://localhost")
+            log_entries = [m["payload"] for m in res.json()["mail"] if m.get("type") == "logEntry"]
+            setup_errors = [e for e in log_entries if e["title"] == "Custom server setup error"]
+            assert len(setup_errors) == 1
+            assert setup_errors[0]["message"] == "server setup exploded"
+            assert "Traceback" in setup_errors[0]["code"]
+
+    def test_create_blueprint_job_api_hides_internal_error_details(self, monkeypatch):
+        async def failing_handle_event(self, session_id, event):
+            raise RuntimeError("/srv/secret/path.py exploded")
+
+        monkeypatch.setattr(writer.serve.AppRunner, "handle_event", failing_handle_event)
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "run")
+        monkeypatch.setenv("WRITER_SECRET_KEY", "abc")
+
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            with client.stream(
+                "POST", "/private/api/blueprint/8ffkuce0ermsm9dr",
+                json={"proposedSessionId": None},
+                headers={"Content-Type": "application/json"}
+            ) as response:
+                events = parse_sse_stream(response)
+
+        event_type, final_payload = events[-1]
+        assert event_type == "error"
+        assert final_payload["msg"] == "Agent Builder internal error."
+        assert "secret" not in json.dumps(events)
+
+    def test_create_blueprint_job_api_hides_blueprint_failure_details(self, monkeypatch):
+        async def failing_handle_event(self, session_id, event):
+            return EventResponse(
+                type="event",
+                status="ok",
+                payload=EventResponsePayload(
+                    result={"ok": False, "result": "RuntimeError: /srv/secret/path.py exploded"},
+                    mutations={},
+                    mail=[],
+                ),
+            )
+
+        monkeypatch.setattr(writer.serve.AppRunner, "handle_event", failing_handle_event)
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "run")
+        monkeypatch.setenv("WRITER_SECRET_KEY", "abc")
+
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            with client.stream(
+                "POST", "/private/api/blueprint/8ffkuce0ermsm9dr",
+                json={"proposedSessionId": None},
+                headers={"Content-Type": "application/json"}
+            ) as response:
+                events = parse_sse_stream(response)
+
+        event_type, final_payload = events[-1]
+        assert event_type == "error"
+        assert final_payload["msg"] == "Blueprint execution failed."
+        assert "secret" not in json.dumps(events)
+
+    def test_import_rejects_invalid_zip_with_user_message(self):
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "edit")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            res = client.post("/api/import", files={"file": ("project.zip", b"not a zip", "application/zip")})
+            assert res.status_code == 400
+            assert res.json()["detail"] == {
+                "summary": "Invalid archive contents",
+                "details": "Uploaded file is not a valid ZIP.",
+            }
+
+    def test_import_hides_unexpected_error_details(self, monkeypatch):
+        async def failing_import_zip(self, zip_path):
+            raise ValueError("/srv/secret/path.py: bad component")
+
+        monkeypatch.setattr(writer.serve.AppRunner, "import_zip", failing_import_zip)
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "edit")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            res = client.post("/api/import", files={"file": ("project.zip", b"PK", "application/zip")})
+            assert res.status_code == 400
+            assert "secret" not in res.text
+            assert "Traceback" not in res.text
+            assert res.json()["detail"]["summary"] == "Invalid archive contents"

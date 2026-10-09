@@ -71,6 +71,10 @@ class MessageHandlingException(Exception):
     pass
 
 
+class ImportArchiveError(ValueError):
+    """Raised for invalid project archives; the message is safe to show to the user."""
+
+
 class SessionPruner(threading.Thread):
     """
     Prunes sessions in intervals, without interfering with the AppProcess server thread.
@@ -1204,11 +1208,11 @@ class AppRunner:
                         break
 
                 if main_py_dir is None:
-                    raise ValueError("main.py not found in the imported archive.")
+                    raise ImportArchiveError("main.py not found in the imported archive.")
 
                 wf_dir_path = os.path.join(main_py_dir, ".wf")
                 if not os.path.isdir(wf_dir_path):
-                    raise ValueError(".wf directory not found alongside main.py in the archive.")
+                    raise ImportArchiveError(".wf directory not found alongside main.py in the archive.")
 
                 # Parse files to ensure there are no errors
                 wf_project.read_files(main_py_dir)
@@ -1225,7 +1229,7 @@ class AppRunner:
                 self.bmc_components = self._load_persisted_components()
                 self.reload_code_from_saved()
         except zipfile.BadZipFile:
-            raise ValueError("Uploaded file is not a valid ZIP.")
+            raise ImportArchiveError("Uploaded file is not a valid ZIP.")
 
     def _clean_process(self) -> None:
         # Terminate the AppProcess server by sending an empty message
