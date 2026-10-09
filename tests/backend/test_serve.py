@@ -406,3 +406,86 @@ class TestServe:
             response_json = res.json()
             assert response_json["status"] == "error"
             assert "Project saver process is not running" in response_json["message"]
+
+
+class TestDataRoutes:
+
+    LOCAL_ORIGIN = {"origin": "http://localhost:4005"}
+
+    @pytest.fixture
+    def kv_storage(self, monkeypatch):
+        import writer.keyvalue_storage
+
+        class FakeStorage:
+            def __init__(self):
+                self.data = {
+                    "wf-journal-a-1": {"data": {"payload": "secret"}},
+                    "wf-init-logs-a-1": {"data": {"stdout": "hi"}},
+                    "../agent_secret/vault": {"data": "unreachable"},
+                }
+                self.deleted = []
+
+            def get_data_keys(self):
+                return list(self.data.keys())
+
+            def get(self, key, type_):
+                writer.keyvalue_storage.validate_key(key)
+                return self.data[key]
+
+            def delete(self, key):
+                self.deleted.append(key)
+                return {"key": key}
+
+        storage = FakeStorage()
+        monkeypatch.setattr(writer.keyvalue_storage, "writer_kv_storage", storage)
+        return storage
+
+    def test_retrieve_rejected_in_run_mode(self, kv_storage):
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "run")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            res = client.post("/api/data/retrieve", json={}, headers=self.LOCAL_ORIGIN)
+            assert res.status_code == 403
+            assert "secret" not in res.text
+
+    def test_delete_rejected_in_run_mode(self, kv_storage):
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "run")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            res = client.post("/api/data/delete", json={"keys": ["wf-journal-a-1"]}, headers=self.LOCAL_ORIGIN)
+            assert res.status_code == 403
+            assert kv_storage.deleted == []
+
+    @pytest.mark.parametrize("headers", [{}, {"origin": "https://attacker.example"}])
+    def test_edit_mode_rejects_non_local_origin(self, kv_storage, headers):
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "edit")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            res = client.post("/api/data/retrieve", json={}, headers=headers)
+            assert res.status_code == 403
+            res = client.post("/api/data/delete", json={"keys": ["wf-journal-a-1"]}, headers=headers)
+            assert res.status_code == 403
+            assert kv_storage.deleted == []
+
+    def test_edit_mode_retrieve_skips_unsafe_keys(self, kv_storage):
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "edit")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            res = client.post("/api/data/retrieve", json={"key_contains": "wf-journal-"}, headers=self.LOCAL_ORIGIN)
+            assert res.status_code == 200
+            assert res.json() == {"result": {"wf-journal-a-1": {"payload": "secret"}}}
+
+            res = client.post("/api/data/retrieve", json={}, headers=self.LOCAL_ORIGIN)
+            assert res.status_code == 200
+            assert set(res.json()["result"]) == {"wf-journal-a-1", "wf-init-logs-a-1"}
+
+    def test_edit_mode_delete_rejects_traversal_keys(self, kv_storage):
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "edit")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            res = client.post(
+                "/api/data/delete",
+                json={"keys": ["wf-journal-a-1", "../agent_secret/vault"]},
+                headers=self.LOCAL_ORIGIN,
+            )
+            assert res.status_code == 400
+            assert kv_storage.deleted == []
+
+            res = client.post("/api/data/delete", json={"keys": ["wf-journal-a-1"]}, headers=self.LOCAL_ORIGIN)
+            assert res.status_code == 200
+            assert kv_storage.deleted == ["wf-journal-a-1"]
