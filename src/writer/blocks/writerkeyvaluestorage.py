@@ -1,10 +1,8 @@
-import re
-
 from writer.abstract import register_abstract_template
 from writer.blocks.base_block import WriterBlock
+from writer.keyvalue_storage import ALLOWED_KEY_CHARS as ALLOWED_CHARS
 from writer.ss_types import AbstractTemplate, WriterConfigurationError
 
-ALLOWED_CHARS = re.compile(r'^[A-Za-z0-9\-_]+$')
 
 class WriterKeyValueStorage(WriterBlock):
     @classmethod

@@ -406,3 +406,79 @@ class TestServe:
             response_json = res.json()
             assert response_json["status"] == "error"
             assert "Project saver process is not running" in response_json["message"]
+
+
+class FakeKeyValueStorage:
+    def __init__(self, data):
+        self.data = dict(data)
+        self.deleted = []
+
+    def get_data_keys(self):
+        return list(self.data.keys())
+
+    def get(self, key, type_):
+        return {"data": self.data[key]}
+
+    def delete(self, key):
+        self.deleted.append(key)
+        self.data.pop(key, None)
+        return {"key": key}
+
+
+class TestDataEndpoints:
+
+    LOCAL_ORIGIN = {"Origin": "http://localhost:3006"}
+
+    @pytest.fixture
+    def kv(self, monkeypatch):
+        import writer.keyvalue_storage
+        storage = FakeKeyValueStorage({
+            "wf-journal-e-1": {"j": 1},
+            "wf-init-logs-e-2": {"l": 2},
+            "user_data": {"secret": True},
+        })
+        monkeypatch.setattr(writer.keyvalue_storage, "writer_kv_storage", storage)
+        return storage
+
+    @pytest.mark.parametrize("path,body", [
+        ("/api/data/retrieve", {}),
+        ("/api/data/delete", {"keys": ["wf-journal-e-1"]}),
+    ])
+    def test_run_mode_is_forbidden(self, kv, path, body):
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "run")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            res = client.post(path, json=body, headers=self.LOCAL_ORIGIN)
+            assert res.status_code == 403
+        assert kv.deleted == []
+        assert "wf-journal-e-1" in kv.data
+
+    @pytest.mark.parametrize("path,body", [
+        ("/api/data/retrieve", {}),
+        ("/api/data/delete", {"keys": ["wf-journal-e-1"]}),
+    ])
+    def test_edit_mode_rejects_remote_origin(self, kv, path, body):
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "edit")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            res = client.post(path, json=body, headers={"Origin": "https://evil.example.com"})
+            assert res.status_code == 403
+        assert kv.deleted == []
+
+    @pytest.mark.parametrize("key", ["../agent_secret/vault", "user_data", "wf-journal-../x", "wf-journal-a?x"])
+    def test_delete_rejects_non_journal_keys(self, kv, key):
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "edit")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            res = client.post("/api/data/delete", json={"keys": ["wf-journal-e-1", key]}, headers=self.LOCAL_ORIGIN)
+            assert res.status_code == 400
+        assert kv.deleted == []
+
+    def test_edit_mode_journal_flow(self, kv):
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "edit")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            res = client.post("/api/data/retrieve", json={}, headers=self.LOCAL_ORIGIN)
+            assert res.status_code == 200
+            assert res.json()["result"] == {"wf-journal-e-1": {"j": 1}, "wf-init-logs-e-2": {"l": 2}}
+
+            res = client.post("/api/data/delete", json={"keys": ["wf-journal-e-1", "wf-init-logs-e-2"]}, headers=self.LOCAL_ORIGIN)
+            assert res.status_code == 200
+        assert sorted(kv.deleted) == ["wf-init-logs-e-2", "wf-journal-e-1"]
+        assert "user_data" in kv.data
