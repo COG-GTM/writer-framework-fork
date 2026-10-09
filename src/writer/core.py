@@ -1529,8 +1529,11 @@ class EventDeserialiser:
         return tf_payload
 
     def _transform_chatbot_message(self, ev) -> dict:
+        from writer.ai import Conversation
+
         payload = dict(ev.payload)
-        return payload
+        payload.setdefault("role", "user")
+        return dict(Conversation.build_user_message(payload))
 
     def _transform_chatbot_action_click(self, ev) -> str:
         payload = str(ev.payload)

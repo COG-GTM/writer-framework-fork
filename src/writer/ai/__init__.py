@@ -1296,6 +1296,73 @@ class Conversation:
         if message["role"] not in ["system", "assistant", "user", "tool"]:
             raise ValueError(f"Unsupported role in message: {message}")
 
+    @classmethod
+    def build_user_message(cls, message) -> 'Conversation.Message':
+        """
+        Builds a user turn from untrusted input, such as the payload of a
+        `wf-chatbot-message` event. The role is always "user" and only
+        validated content is kept: keys such as "chunk", "tool_calls",
+        "tool_call_id" or "actions" are dropped.
+
+        :param message: Dictionary with "content" and an optional "role".
+        :raises ValueError: If the message isn't a dict, specifies a role
+        other than "user", or has malformed content.
+        """
+        if not isinstance(message, dict):
+            raise ValueError("User message must be a dict")
+        role = message.get("role", "user")
+        if role != "user":
+            raise ValueError(
+                f"Only user messages are accepted here, got role {role!r}"
+                )
+        if "content" not in message:
+            raise ValueError("User message is missing 'content'")
+
+        content = message["content"]
+        if isinstance(content, str):
+            safe_content: Union[str, List[Conversation.ContentFragment]] = \
+                content
+        elif isinstance(content, list):
+            safe_content = []
+            for fragment in content:
+                if not isinstance(fragment, dict):
+                    raise ValueError("Content fragments must be dicts")
+                fragment_type = fragment.get("type")
+                if fragment_type == "text":
+                    text = fragment.get("text")
+                    if not isinstance(text, str):
+                        raise ValueError("Text fragment requires string 'text'")
+                    safe_content.append({"type": "text", "text": text})
+                elif fragment_type == "image_url":
+                    image_url = fragment.get("image_url")
+                    url = image_url.get("url") \
+                        if isinstance(image_url, dict) else None
+                    if not isinstance(url, str):
+                        raise ValueError(
+                            "Image fragment requires string 'image_url.url'"
+                            )
+                    safe_content.append(
+                        cast(
+                            Conversation.ContentFragment,
+                            {"type": "image_url", "image_url": {"url": url}}
+                            )
+                        )
+                else:
+                    raise ValueError(
+                        f"Unsupported content fragment type {fragment_type!r}"
+                        )
+        else:
+            raise ValueError(
+                "User message content must be a string or a list of fragments"
+                )
+
+        user_message = cast(
+            Conversation.Message,
+            {"role": "user", "content": safe_content}
+            )
+        cls.validate_message(user_message)
+        return user_message
+
     def __init__(
             self,
             prompt_or_history: Optional[
@@ -1369,8 +1436,12 @@ class Conversation:
 
         if not self.messages:
             raise ValueError("No message to merge chunk with")
-        clear_chunk = _clear_chunk_flag(raw_chunk)
         updated_last_message: 'Conversation.Message' = self.messages[-1]
+        if updated_last_message.get("role") == "system":
+            raise ValueError("Chunks cannot be merged into a system message")
+        clear_chunk = _clear_chunk_flag(raw_chunk)
+        # A chunk extends the last message; it must not change who sent it.
+        clear_chunk.pop("role", None)
         if "content" in clear_chunk:
             new_content = clear_chunk.pop("content") or ""
             if isinstance(updated_last_message["content"], list):
