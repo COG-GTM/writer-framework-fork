@@ -34,7 +34,7 @@ from urllib.parse import urlsplit
 
 import orjson
 import uvicorn
-from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.routing import Mount
 from fastapi.staticfiles import StaticFiles
@@ -188,15 +188,55 @@ def get_asgi_app(
 
     cached_extension_paths = _get_extension_paths()
 
+    LOCAL_HOSTNAMES = ("127.0.0.1", "localhost")
+
     def _check_origin_header(origin_header: Optional[str]) -> bool:
-        if serve_mode not in ("edit") or enable_remote_edit is True:
+        if serve_mode != "edit" or enable_remote_edit is True:
             return True
         if origin_header is None:
             return False
         hostname = urlsplit(origin_header).hostname
-        if hostname in ("127.0.0.1", "localhost"):
+        if hostname in LOCAL_HOSTNAMES:
             return True
         return False
+
+    def _check_host_header(host_header: Optional[str]) -> bool:
+        if serve_mode != "edit" or enable_remote_edit is True:
+            return True
+        if not host_header:
+            return False
+        try:
+            hostname = urlsplit(f"//{host_header}").hostname
+        except ValueError:
+            return False
+        return hostname in LOCAL_HOSTNAMES
+
+    async def _verify_local_edit_request(request: Request) -> None:
+        """
+        Guards HTTP routes against cross-site request forgery and DNS rebinding
+        when running in edit mode without remote edit enabled.
+        """
+        if serve_mode != "edit" or enable_remote_edit is True:
+            return
+
+        rejection_message = "Incorrect origin. Only local origins are allowed."
+        if not _check_host_header(request.headers.get("host")):
+            logging.error("A request with host %s was rejected in edit mode.", request.headers.get("host"))
+            raise HTTPException(status_code=403, detail=rejection_message)
+
+        origin_header = request.headers.get("origin")
+        # Browsers omit Origin on same-origin GET/HEAD requests, but always send it otherwise
+        if origin_header is None and request.method in ("GET", "HEAD"):
+            fetch_site = request.headers.get("sec-fetch-site")
+            if fetch_site is not None and fetch_site not in ("same-origin", "none"):
+                raise HTTPException(status_code=403, detail=rejection_message)
+            return
+
+        if not _check_origin_header(origin_header):
+            logging.error("A request with origin %s was rejected in edit mode.", origin_header)
+            raise HTTPException(status_code=403, detail=rejection_message)
+
+    local_edit_guard = [Depends(_verify_local_edit_request)]
 
     # Init
 
@@ -254,7 +294,7 @@ def get_asgi_app(
         
         return {"status": "ok"}
 
-    @app.get("/api/export")
+    @app.get("/api/export", dependencies=local_edit_guard)
     async def export_zip():
         if serve_mode != "edit":
             raise HTTPException(status_code=403, detail="Invalid mode.")
@@ -267,7 +307,7 @@ def get_asgi_app(
             }
         )
 
-    @app.post("/api/import")
+    @app.post("/api/import", dependencies=local_edit_guard)
     async def import_zip(file: UploadFile = File(...)):
         if serve_mode != "edit":
             raise HTTPException(status_code=403, detail={"summary": "Invalid mode. Expected 'edit'"})
@@ -293,7 +333,7 @@ def get_asgi_app(
         except ValueError as e:
             raise HTTPException(status_code=400, detail={"summary": "Invalid archive contents", "details": traceback.format_exc()}) from e
 
-    @app.post("/api/autogen")
+    @app.post("/api/autogen", dependencies=local_edit_guard)
     async def autogen(requestBody: AutogenRequestBody, request: Request):
         import writer.autogen
         agent_token_header = request.headers.get('x-agent-token')
@@ -303,7 +343,7 @@ def get_asgi_app(
             agent_token_header
             )
 
-    @app.post("/api/data/retrieve")
+    @app.post("/api/data/retrieve", dependencies=local_edit_guard)
     async def retrieve_data(requestBody: RetrieveDataRequestBody) -> RetrieveDataResponseBody:
         from writer.keyvalue_storage import writer_kv_storage
 
@@ -324,7 +364,7 @@ def get_asgi_app(
 
         return RetrieveDataResponseBody(result={k: v["data"] for k, v in kv_pairs})
 
-    @app.post("/api/data/delete")
+    @app.post("/api/data/delete", dependencies=local_edit_guard)
     async def delete_data(requestBody: DeleteDataRequestBody) -> None:
         from writer.keyvalue_storage import writer_kv_storage
 

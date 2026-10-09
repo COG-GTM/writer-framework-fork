@@ -406,3 +406,74 @@ class TestServe:
             response_json = res.json()
             assert response_json["status"] == "error"
             assert "Project saver process is not running" in response_json["message"]
+
+
+class TestEditModeRequestGuard:
+
+    LOCAL_BASE_URL = "http://127.0.0.1:4005"
+    LOCAL_ORIGIN = "http://127.0.0.1:4005"
+
+    def test_import_rejects_cross_site_origin(self):
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "edit")
+        with fastapi.testclient.TestClient(asgi_app, base_url=self.LOCAL_BASE_URL) as client:
+            res = client.post(
+                "/api/import",
+                files={"file": ("agent.zip", b"not a zip", "application/zip")},
+                headers={"Origin": "https://attacker.example"},
+            )
+            assert res.status_code == 403
+
+    def test_import_rejects_missing_origin(self):
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "edit")
+        with fastapi.testclient.TestClient(asgi_app, base_url=self.LOCAL_BASE_URL) as client:
+            res = client.post(
+                "/api/import",
+                files={"file": ("agent.zip", b"not a zip", "application/zip")},
+            )
+            assert res.status_code == 403
+
+    def test_import_allows_local_origin(self):
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "edit")
+        with fastapi.testclient.TestClient(asgi_app, base_url=self.LOCAL_BASE_URL) as client:
+            res = client.post(
+                "/api/import",
+                files={"file": ("agent.zip", b"not a zip", "application/zip")},
+                headers={"Origin": self.LOCAL_ORIGIN},
+            )
+            # Passes the guard and fails archive validation instead
+            assert res.status_code == 400
+
+    def test_export_rejects_non_local_host(self):
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "edit")
+        with fastapi.testclient.TestClient(asgi_app, base_url="http://rebind.attacker.example:4005") as client:
+            res = client.get("/api/export")
+            assert res.status_code == 403
+
+    def test_export_rejects_cross_site_fetch(self):
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "edit")
+        with fastapi.testclient.TestClient(asgi_app, base_url=self.LOCAL_BASE_URL) as client:
+            res = client.get("/api/export", headers={"Sec-Fetch-Site": "cross-site"})
+            assert res.status_code == 403
+            res = client.get("/api/export", headers={"Origin": "https://attacker.example"})
+            assert res.status_code == 403
+
+    def test_export_allows_same_origin_request(self):
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "edit")
+        with fastapi.testclient.TestClient(asgi_app, base_url=self.LOCAL_BASE_URL) as client:
+            res = client.get("/api/export", headers={"Sec-Fetch-Site": "same-origin"})
+            assert res.status_code == 200
+            assert res.headers["content-type"] == "application/x-zip-compressed"
+
+    def test_data_routes_reject_cross_site_origin(self):
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "edit")
+        with fastapi.testclient.TestClient(asgi_app, base_url=self.LOCAL_BASE_URL) as client:
+            headers = {"Origin": "https://attacker.example"}
+            assert client.post("/api/data/retrieve", json={}, headers=headers).status_code == 403
+            assert client.post("/api/data/delete", json={"keys": []}, headers=headers).status_code == 403
+            assert client.post("/api/autogen", json={"description": "x"}, headers=headers).status_code == 403
+
+    def test_remote_edit_disables_guard(self):
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "edit", enable_remote_edit=True)
+        with fastapi.testclient.TestClient(asgi_app, base_url="http://builder.example.com") as client:
+            res = client.get("/api/export", headers={"Origin": "https://builder.example.com"})
+            assert res.status_code == 200
