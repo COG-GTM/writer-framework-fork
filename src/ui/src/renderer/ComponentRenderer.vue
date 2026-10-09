@@ -42,7 +42,7 @@ import {
 	serializeParsedHash,
 } from "@/core/navigation";
 import { WDS_CSS_PROPERTIES } from "@/wds/tokens";
-import { resolveAssetURL } from "@/utils/url";
+import { resolveAssetURL, sanitizeUrl } from "@/utils/url";
 
 const wf = inject(injectionKeys.core);
 const wfbm = inject(injectionKeys.builderManager);
@@ -162,8 +162,14 @@ function addMailSubscriptions() {
 		},
 	);
 	wf.addMailSubscription("openUrl", (url: string) => {
+		const safeUrl = sanitizeUrl(url);
+		if (!safeUrl || safeUrl === "about:blank") {
+			// eslint-disable-next-line no-console
+			console.warn("Blocked openUrl with a disallowed URL scheme.");
+			return;
+		}
 		const el = document.createElement("a");
-		el.href = url;
+		el.href = safeUrl;
 		el.target = "_blank";
 		el.rel = "noopener noreferrer";
 		el.click();
