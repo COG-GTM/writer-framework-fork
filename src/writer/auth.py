@@ -1,5 +1,6 @@
 import asyncio
 import dataclasses
+import json
 import logging
 import os.path
 import time
@@ -13,7 +14,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 import writer.serve
-from writer.core import session_manager
+from writer.core import SessionManager, session_manager
 from writer.serve import WriterFastAPI
 from writer.ss_types import InitSessionRequestPayload
 
@@ -177,8 +178,10 @@ class Oidc(Auth):
     callback_authorize: str = "authorize"
     url_userinfo: Optional[str] = None
     app_static_public: bool = False
+    session_max_age_seconds: int = SessionManager.IDLE_SESSION_MAX_SECONDS
 
     authlib: OAuth2Session = None
+    issued_sessions: Dict[str, float] = dataclasses.field(default_factory=dict)  # session id issued by the callback -> expiry timestamp
     callback_func: Optional[Callable[[Request, str, dict], None]] = None # Callback to validate user authentication
     unauthorized_action: Optional[Callable[[Request, Unauthorized], Response]] = None # Callback to build its own page when a user is not allowed
 
@@ -222,19 +225,24 @@ class Oidc(Auth):
 
         self.unauthorized_action = unauthorized_action
         self.callback_func = callback
+        secure_cookie = urlparse(self.host_url).scheme == "https"
 
         @asgi_app.middleware("http")
         async def oidc_middleware(request: Request, call_next):
             session = request.cookies.get('session')
 
             is_one_of_url_prefix_allowed = any(request.url.path.startswith(url_prefix) for url_prefix in auth_authorized_prefix_paths)
-            if session is not None or request.url.path in auth_authorized_routes or is_one_of_url_prefix_allowed:
+            if self.is_session_issued(session) or request.url.path in auth_authorized_routes or is_one_of_url_prefix_allowed:
                 response: Response = await call_next(request)
                 return response
             else:
                 url = self.authlib.create_authorization_url(self.url_authorize)
                 response = RedirectResponse(url=url[0])
+                if session is not None:
+                    response.delete_cookie("session")
                 return response
+
+        asgi_app.add_middleware(_StreamSessionGuard, is_session_allowed=self.is_session_issued)
 
         @asgi_app.get('/' + urlstrip(self.callback_authorize))
         async def route_callback(request: Request):
@@ -258,7 +266,15 @@ class Oidc(Auth):
                 if self.url_userinfo:
                     app_runner.set_userinfo(session_id=session_id, userinfo=userinfo)
 
-                response.set_cookie(key="session", value=session_id, httponly=True)
+                self._issue_session(session_id)
+                response.set_cookie(
+                    key="session",
+                    value=session_id,
+                    max_age=self.session_max_age_seconds,
+                    httponly=True,
+                    secure=secure_cookie,
+                    samesite="lax",
+                )
                 return response
             except Unauthorized as exc:
                 if self.unauthorized_action is not None:
@@ -270,6 +286,75 @@ class Oidc(Auth):
                         "message": exc.message,
                         "more_info": exc.more_info
                     })
+
+    def is_session_issued(self, session_id: Optional[str]) -> bool:
+        """
+        Returns True only for session ids issued by the OIDC callback that have not expired.
+        """
+        if session_id is None:
+            return False
+        expires_at = self.issued_sessions.get(session_id)
+        if expires_at is None:
+            return False
+        if expires_at <= time.time():
+            del self.issued_sessions[session_id]
+            return False
+        return True
+
+    def _issue_session(self, session_id: str) -> None:
+        now = time.time()
+        for expired_session_id in [sid for sid, expires_at in self.issued_sessions.items() if expires_at <= now]:
+            del self.issued_sessions[expired_session_id]
+        self.issued_sessions[session_id] = now + self.session_max_age_seconds
+
+
+class _StreamSessionGuard:
+    """
+    ASGI middleware that closes `/api/stream` websockets whose session is not allowed, both at
+    `streamInit` and on every later message, so an expired login cannot keep using the stream.
+    """
+
+    def __init__(self, app, is_session_allowed: Callable[[Optional[str]], bool]):
+        self.app = app
+        self.is_session_allowed = is_session_allowed
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "websocket" or not scope["path"].endswith("/api/stream"):
+            await self.app(scope, receive, send)
+            return
+
+        session_id: Optional[str] = None
+
+        async def guarded_receive():
+            nonlocal session_id
+            message = await receive()
+            if message["type"] != "websocket.receive":
+                return message
+            if session_id is None:
+                session_id = _stream_init_session_id(message)
+                if session_id is None:
+                    return message
+            if not self.is_session_allowed(session_id):
+                await send({"type": "websocket.close", "code": 1008})
+                return {"type": "websocket.disconnect", "code": 1008}
+            return message
+
+        await self.app(scope, guarded_receive, send)
+
+
+def _stream_init_session_id(message: dict) -> Optional[str]:
+    raw = message.get("text") or message.get("bytes")
+    if raw is None:
+        return None
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(data, dict) or data.get("type") != "streamInit":
+        return None
+    payload = data.get("payload")
+    session_id = payload.get("sessionId") if isinstance(payload, dict) else None
+    return session_id if isinstance(session_id, str) else ""
 
 
 def Google(client_id: str, client_secret: str, host_url: str, app_static_public = False) -> Oidc:
