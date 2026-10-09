@@ -1,10 +1,16 @@
-from typing import TYPE_CHECKING, Any, Dict, Optional, Type
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type
 
 import httpx
 from writerai import DefaultHttpxClient, Writer
 
 import writer.core_ui
 import writer.evaluator
+from writer.blocks.redaction import (
+    collect_secret_values,
+    redact_body,
+    redact_headers,
+    redact_url,
+)
 from writer.ss_types import WriterConfigurationError
 
 if TYPE_CHECKING:
@@ -87,6 +93,23 @@ class BlueprintBlock:
 
         return value
 
+    def _get_secret_values(self) -> List[str]:
+        """
+        Resolved secrets (vault values and environment variables referenced by
+        this block's fields) that must not be echoed into results or logs.
+        """
+        def resolve(expr: str) -> Any:
+            return self.evaluator.evaluate_expression(
+                expr, self.instance_path, self.execution_environment
+            )
+
+        return collect_secret_values(
+            self.execution_environment.get("vault"), self.component.content.values(), resolve
+        )
+
+    def _redact_logged_content(self, content: Optional[str]) -> Optional[str]:
+        return redact_body(content, self._get_secret_values())
+
     def _set_state(self, expr: str, value: Any):
         self.evaluator.set_state(
             expr, self.instance_path, value, base_context=self.execution_environment
@@ -116,7 +139,7 @@ class BlueprintBlock:
                 try:
                     # For non-streaming responses, capture content immediately
                     if response.is_closed or response.is_stream_consumed:
-                        log_entry["response"]["content"] = response.text
+                        log_entry["response"]["content"] = self._redact_logged_content(response.text)
                     else:
                         # For streaming responses, we'll update after consumption
                         log_entry["response"]["content"] = "<pending stream consumption>"
@@ -138,7 +161,7 @@ class BlueprintBlock:
                             else:
                                 if hasattr(response, '_log_entry_ref'):
                                     try:
-                                        response._log_entry_ref["response"]["content"] = content.decode('utf-8', errors='replace')
+                                        response._log_entry_ref["response"]["content"] = self._redact_logged_content(content.decode('utf-8', errors='replace'))
                                     except Exception:
                                         response._log_entry_ref["response"]["content"] = "<binary content>"
                                 return content
@@ -152,7 +175,7 @@ class BlueprintBlock:
                             finally:
                                 if hasattr(response, '_log_entry_ref'):
                                     try:
-                                        response._log_entry_ref["response"]["content"] = b"".join(chunks).decode("utf-8", errors="replace")
+                                        response._log_entry_ref["response"]["content"] = self._redact_logged_content(b"".join(chunks).decode("utf-8", errors="replace"))
                                     except Exception:
                                         response._log_entry_ref["response"]["content"] = "<binary content>"
                         
@@ -166,7 +189,7 @@ class BlueprintBlock:
                                 if hasattr(response, '_log_entry_ref'):
                                     try:
                                         full_content = b''.join(accumulated_content)
-                                        response._log_entry_ref["response"]["content"] = full_content.decode('utf-8', errors='replace')
+                                        response._log_entry_ref["response"]["content"] = self._redact_logged_content(full_content.decode('utf-8', errors='replace'))
                                     except Exception:
                                         response._log_entry_ref["response"]["content"] = "<binary content>"
                         
@@ -178,7 +201,7 @@ class BlueprintBlock:
                                     yield chunk
                             finally:
                                 if hasattr(response, '_log_entry_ref'):
-                                    response._log_entry_ref["response"]["content"] = ''.join(text_chunks)
+                                    response._log_entry_ref["response"]["content"] = self._redact_logged_content(''.join(text_chunks))
                         
                         def wrapped_iter_lines(*args, **kwargs):
                             lines = []
@@ -188,7 +211,7 @@ class BlueprintBlock:
                                     yield line
                             finally:
                                 if hasattr(response, '_log_entry_ref'):
-                                    response._log_entry_ref["response"]["content"] = '\n'.join(lines)
+                                    response._log_entry_ref["response"]["content"] = self._redact_logged_content('\n'.join(lines))
                         
                         response.read = wrapped_read
                         response.iter_raw = wrapped_iter_raw
@@ -229,6 +252,7 @@ class BlueprintBlock:
     ):
         import uuid
         instance_path = self.instance_path[0].get('componentId', None)
+        block = self
 
         class ExecutionEnvironmentLogger:
             """
@@ -292,15 +316,16 @@ class BlueprintBlock:
                 else:
                     content = None
 
+                secrets = block._get_secret_values()
                 log_entry = {
                     'id': request_id,
                     'created_at': dt.datetime.now(dt.timezone.utc).isoformat(),
                     'created_by': current_block_id,
                     'request': {
                         'method': request.method,
-                        'url': str(request.url),
-                        'headers': dict(request.headers),
-                        'content': content
+                        'url': redact_url(str(request.url), secrets),
+                        'headers': redact_headers(request.headers, secrets),
+                        'content': redact_body(content, secrets)
                     },
                     'response': None  # Will populate later
                 }
@@ -316,10 +341,11 @@ class BlueprintBlock:
                     # Unlikely scenario
                     return
 
+                secrets = block._get_secret_values()
                 log_entry['response'] = {
                     'status_code': response.status_code,
-                    'url': str(response.url),
-                    'headers': dict(response.headers),
+                    'url': redact_url(str(response.url), secrets),
+                    'headers': redact_headers(response.headers, secrets),
                     'content': None  # Initially empty
                 }
                 response.extensions['log_entry'] = log_entry
