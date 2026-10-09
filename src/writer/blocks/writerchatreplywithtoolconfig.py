@@ -271,7 +271,7 @@ class WriterChatReplyWithToolConfig(WriterBlock):
         try:
             import writer.ai
 
-            conversation_state_element = self._get_field("conversationStateElement", required=True)
+            conversation_state_element = self._get_state_path_field("conversationStateElement", required=True)
             message = self._get_field("message", as_json=True)
             generate_reply = self._get_field("generateReply", False, "yes") == "yes"
 

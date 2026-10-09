@@ -91,7 +91,7 @@ class WriterAddChatMessage(BlueprintBlock):
         try:
             import writer.ai
 
-            conversation_state_element = self._get_field("conversationStateElement", required=True)
+            conversation_state_element = self._get_state_path_field("conversationStateElement", required=True)
             message = self._get_field("message", as_json=True, required=True)
 
             conversation = self.evaluator.evaluate_expression(conversation_state_element, self.instance_path, self.execution_environment)

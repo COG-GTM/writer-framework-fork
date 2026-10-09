@@ -23,6 +23,7 @@ class Evaluator:
 
     TEMPLATE_REGEX = re.compile(r"[\\]?@{([^{]*?)}")
     CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+    STATE_PATH_SPECIAL_CHARS = re.compile(r"([\\.\[\]$])")
 
     def __init__(self, state: "WriterState", component_tree: "ComponentTree"):
         self.state = state
@@ -84,6 +85,73 @@ class Evaluator:
 
         return replaced
 
+    def evaluate_state_path_field(
+        self,
+        instance_path: InstancePath,
+        field_key: str,
+        default_field_value="",
+        base_context={},
+    ) -> str:
+        """
+        Evaluates a field holding a state path (e.g. a Link Variable).
+        Template output is escaped so it's always a literal key segment and
+        can't add accessors, sub-expressions or environment lookups.
+        """
+
+        component_id = instance_path[-1]["componentId"]
+        component = self.component_tree.get_component(component_id)
+        if not component:
+            raise ValueError(f'Component with id "{component_id}" not found.')
+
+        field_value = component.content.get(field_key) or default_field_value
+        result = ""
+        level = 0
+        position = 0
+        for matched in self.TEMPLATE_REGEX.finditer(field_value):
+            literal = field_value[position : matched.start()]
+            level = self._get_bracket_level(literal, level)
+            result += literal
+            position = matched.end()
+            if matched.group(0)[0] == "\\":
+                result += matched.group(0)
+                continue
+            if level > 0:
+                raise WriterConfigurationError(
+                    f"Templates can't be used inside brackets in the state path of field `{field_key}`."
+                )
+            expr_value = self.evaluate_expression(
+                matched.group(1).strip(), instance_path, base_context
+            )
+            if expr_value is None or expr_value == "":
+                if matched.group(0) == field_value:
+                    return ""
+                raise WriterConfigurationError(
+                    f"A template in the state path of field `{field_key}` resolved to an empty value."
+                )
+            if not isinstance(expr_value, str):
+                try:
+                    expr_value = json.dumps(expr_value)
+                except (TypeError, ValueError):
+                    raise WriterConfigurationError(
+                        f"A template in the state path of field `{field_key}` didn't resolve to a valid key."
+                    ) from None
+            result += self.STATE_PATH_SPECIAL_CHARS.sub(r"\\\1", expr_value)
+        result += field_value[position:]
+        return result
+
+    @staticmethod
+    def _get_bracket_level(text: str, level: int) -> int:
+        i = 0
+        while i < len(text):
+            if text[i] == "\\":
+                i += 1
+            elif text[i] == "[":
+                level += 1
+            elif text[i] == "]":
+                level -= 1
+            i += 1
+        return level
+
     def get_context_data(self, instance_path: InstancePath, base_context={}) -> Dict[str, Any]:
         context: Dict[str, Any] = base_context
         for i in range(len(instance_path)):
@@ -136,17 +204,20 @@ class Evaluator:
         accessors = self.parse_expression(expr, instance_path, base_context)
         state_ref = self.state
 
-        for accessor in accessors[:-1]:
-            if isinstance(state_ref, list):
-                state_ref = state_ref[int(accessor)]
-            else:
-                state_ref = state_ref[accessor]
+        try:
+            for accessor in accessors[:-1]:
+                if isinstance(state_ref, list):
+                    state_ref = state_ref[int(accessor)]
+                else:
+                    state_ref = state_ref[accessor]
+        except (KeyError, IndexError, TypeError, ValueError):
+            raise ValueError("The state reference can't be resolved. The path doesn't exist.") from None
 
         if not isinstance(
             state_ref, (writer.core.State, writer.core.WriterState, writer.core.StateProxy, dict)
         ):
             raise ValueError(
-                f'Reference "{expr}" cannot be translated to state. Found value of type "{type(state_ref)}".'
+                f'The state reference can\'t be written to. Found value of type "{type(state_ref).__name__}".'
             )
 
         state_ref[accessors[-1]] = value

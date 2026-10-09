@@ -87,6 +87,16 @@ class BlueprintBlock:
 
         return value
 
+    def _get_state_path_field(self, field_key: str, required=False):
+        value = self.evaluator.evaluate_state_path_field(
+            self.instance_path, field_key, "", self.execution_environment
+        )
+
+        if required and value == "":
+            self._handle_missing_field(field_key)
+
+        return value
+
     def _set_state(self, expr: str, value: Any):
         self.evaluator.set_state(
             expr, self.instance_path, value, base_context=self.execution_environment

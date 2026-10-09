@@ -96,7 +96,7 @@ class WriterAskGraphQuestion(WriterBlock):
                 raise ValueError("graphIds must not be empty")
 
             question = self._get_field("question", required=True)
-            state_element = self._get_field("stateElement", required=False)
+            state_element = self._get_state_path_field("stateElement")
             if not state_element and use_streaming:
                 raise ValueError(
                     "A state element must be provided when using streaming.")
