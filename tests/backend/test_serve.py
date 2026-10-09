@@ -355,22 +355,15 @@ class TestServe:
             assert "access-control-allow-origin" not in response.headers
             return parse_sse_stream(response)
 
-    def test_private_api_rejects_remote_callers_without_configured_token(self, monkeypatch):
+    def test_private_api_disabled_without_configured_token(self, monkeypatch):
         monkeypatch.delenv("WRITER_PRIVATE_API_TOKEN", raising=False)
         asgi_app = writer.serve.get_asgi_app(test_app_dir, "run")
-        with fastapi.testclient.TestClient(asgi_app) as client:
-            assert client.get("/private/api/blueprints").status_code == 403
-            assert client.get("/private/api/cron-triggers").status_code == 403
-            res = client.post("/private/api/blueprint/8ffkuce0ermsm9dr", json={})
-            assert res.status_code == 403
-
-    def test_private_api_allows_loopback_without_configured_token(self, monkeypatch):
-        monkeypatch.delenv("WRITER_PRIVATE_API_TOKEN", raising=False)
-        asgi_app = writer.serve.get_asgi_app(test_app_dir, "run")
-        with fastapi.testclient.TestClient(asgi_app, client=("127.0.0.1", 50000)) as client:
-            assert client.get("/private/api/blueprints").status_code == 200
-            res = client.get("/private/api/blueprints", headers={"Origin": "https://attacker.example"})
-            assert res.status_code == 403
+        for client_addr in [("203.0.113.5", 50000), ("127.0.0.1", 50000)]:
+            with fastapi.testclient.TestClient(asgi_app, client=client_addr) as client:
+                assert client.get("/private/api/blueprints").status_code == 403
+                assert client.get("/private/api/cron-triggers").status_code == 403
+                res = client.post("/private/api/blueprint/8ffkuce0ermsm9dr", json={})
+                assert res.status_code == 403
 
     def test_private_api_requires_matching_bearer_token(self, private_api_headers):
         asgi_app = writer.serve.get_asgi_app(test_app_dir, "run")

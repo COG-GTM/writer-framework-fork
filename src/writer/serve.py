@@ -76,7 +76,6 @@ BLUEPRINT_API_EXECUTION_TIMEOUT_SECONDS = int(os.getenv("AGENT_BUILDER_BLUEPRINT
 BLUEPRINT_API_RETRY_TIMEOUT = int(os.getenv("AGENT_BUILDER_BLUEPRINT_API_RETRY_TIMEOUT", "10000"))
 PRIVATE_API_TOKEN_ENV = "WRITER_PRIVATE_API_TOKEN"
 BLUEPRINT_TRIGGER_TYPES = ("blueprints_apitrigger", "blueprints_crontrigger")
-LOOPBACK_HOSTS = ("127.0.0.1", "::1")
 
 
 class WriterState(typing.Protocol):
@@ -391,28 +390,23 @@ def get_asgi_app(
 
     def _require_private_api_auth(request: Request) -> None:
         """
-        Guards /private/api/*. When WRITER_PRIVATE_API_TOKEN is set, a matching
-        `Authorization: Bearer <token>` header is required. Otherwise only
-        non-browser requests from the loopback interface are accepted.
+        Guards /private/api/*. Requires `Authorization: Bearer <token>` matching
+        WRITER_PRIVATE_API_TOKEN; the API is disabled when the variable is unset.
         """
         expected_token = os.getenv(PRIVATE_API_TOKEN_ENV)
-        if expected_token:
-            scheme, _, provided_token = request.headers.get("authorization", "").partition(" ")
-            if scheme.lower() != "bearer" or not hmac.compare_digest(
-                provided_token.strip().encode(), expected_token.encode()
-            ):
-                raise HTTPException(
-                    status_code=401,
-                    detail="Invalid or missing private API token.",
-                    headers={"WWW-Authenticate": "Bearer"},
-                )
-            return
-
-        client_host = request.client.host if request.client else None
-        if client_host not in LOOPBACK_HOSTS or request.headers.get("origin") is not None:
+        if not expected_token:
             raise HTTPException(
                 status_code=403,
                 detail=f"Private API is disabled. Set {PRIVATE_API_TOKEN_ENV} to enable it.",
+            )
+        scheme, _, provided_token = request.headers.get("authorization", "").partition(" ")
+        if scheme.lower() != "bearer" or not hmac.compare_digest(
+            provided_token.strip().encode(), expected_token.encode()
+        ):
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid or missing private API token.",
+                headers={"WWW-Authenticate": "Bearer"},
             )
 
     async def _get_payload_as_json(request: Request) -> Optional[Dict[str, Any]]:
