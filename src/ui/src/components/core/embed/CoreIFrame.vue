@@ -6,7 +6,7 @@
 		<iframe
 			v-else
 			:src="safeSrc"
-			:sandbox="fields.sandbox.value"
+			:sandbox="sandbox"
 			:referrerpolicy="fields.referrerPolicy.value"
 			draggable="false"
 			@load="handleLoad"
@@ -57,7 +57,7 @@ export default {
 			sandbox: {
 				name: "Sandbox",
 				default: DEFAULT_SANDBOX,
-				desc: "Space-separated iframe sandbox tokens that restrict the embedded content. The default does not allow top-level navigation.",
+				desc: "Space-separated iframe sandbox tokens that restrict the embedded content. The default does not allow top-level navigation. allow-same-origin is ignored for same-origin URLs that also allow scripts, since those could remove the sandbox.",
 				type: FieldType.Text,
 			},
 			referrerPolicy: {
@@ -94,6 +94,20 @@ const fields = inject(injectionKeys.evaluatedFields);
 const safeSrc = computed(() =>
 	sanitizeURL(fields.src.value, EMBED_URL_PROTOCOLS),
 );
+
+const sandbox = computed(() => {
+	const tokens = String(fields.sandbox.value ?? "")
+		.split(/\s+/)
+		.filter(Boolean);
+	const canEscape =
+		tokens.includes("allow-scripts") &&
+		tokens.includes("allow-same-origin") &&
+		new URL(safeSrc.value, window.location.href).origin ===
+			window.location.origin;
+	return canEscape
+		? tokens.filter((t) => t !== "allow-same-origin").join(" ")
+		: tokens.join(" ");
+});
 
 function handleLoad() {
 	const event = new CustomEvent("wf-load");

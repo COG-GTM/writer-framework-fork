@@ -32,6 +32,25 @@ describe("CoreIFrame", () => {
 		expect(iframe.attributes("sandbox")).toBe(DEFAULT_SANDBOX);
 	});
 
+	it.each([
+		"static/report.html",
+		"/",
+		`${window.location.origin}/page`,
+		`blob:${window.location.origin}/0b8f-1c2d`,
+	])("should drop allow-same-origin for same-origin %s", (src) => {
+		expect(mountIFrame(src).get("iframe").attributes("sandbox")).toBe(
+			"allow-scripts allow-forms allow-popups",
+		);
+	});
+
+	it("should keep allow-same-origin for same-origin without scripts", () => {
+		expect(
+			mountIFrame("static/report.html", "allow-same-origin allow-forms")
+				.get("iframe")
+				.attributes("sandbox"),
+		).toBe("allow-same-origin allow-forms");
+	});
+
 	it("should apply a custom sandbox", () => {
 		expect(
 			mountIFrame("https://example.com", "allow-scripts")
