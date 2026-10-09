@@ -11,6 +11,12 @@ from fastapi import FastAPI
 
 from tests.backend import test_app_dir, test_multiapp_dir
 
+PRIVATE_API_KEY = "test-private-api-key"
+PRIVATE_API_HEADERS = {
+    "Content-Type": "application/json",
+    "Authorization": f"Bearer {PRIVATE_API_KEY}",
+}
+
 
 def parse_sse_stream(response):
     """
@@ -247,13 +253,14 @@ class TestServe:
                 "afterDeprecationCutoffAbv2",
             }
 
-    def test_get_cron_triggers_api(self):
+    def test_get_cron_triggers_api(self, monkeypatch):
         """
         Test that the cron triggers API endpoint returns a list of cron trigger blocks.
         """
+        monkeypatch.setenv("WRITER_PRIVATE_API_KEY", PRIVATE_API_KEY)
         asgi_app = writer.serve.get_asgi_app(test_app_dir, "run")
         with fastapi.testclient.TestClient(asgi_app) as client:
-            res = client.get("/private/api/cron-triggers")
+            res = client.get("/private/api/cron-triggers", headers=PRIVATE_API_HEADERS)
             assert res.status_code == 200
             cron_triggers = res.json()
             assert isinstance(cron_triggers, list)
@@ -268,12 +275,13 @@ class TestServe:
     def test_create_blueprint_job_api(self, monkeypatch):
         asgi_app = writer.serve.get_asgi_app(test_app_dir, "run")
         monkeypatch.setenv("WRITER_SECRET_KEY", "abc")
+        monkeypatch.setenv("WRITER_PRIVATE_API_KEY", PRIVATE_API_KEY)
         blueprint_id = "8ffkuce0ermsm9dr"
 
         with fastapi.testclient.TestClient(asgi_app) as client:
             with client.stream("POST", f"/private/api/blueprint/{blueprint_id}",
                                 json={"proposedSessionId": None},
-                                headers={"Content-Type": "application/json"}) as response:
+                                headers=PRIVATE_API_HEADERS) as response:
 
                 assert response.status_code == 200
                 assert response.headers["content-type"] == "text/event-stream; charset=utf-8"
@@ -297,12 +305,13 @@ class TestServe:
     def test_create_blueprint_job_api_error_handling(self, monkeypatch):
         asgi_app = writer.serve.get_asgi_app(test_app_dir, "run")
         monkeypatch.setenv("WRITER_SECRET_KEY", "abc")
+        monkeypatch.setenv("WRITER_PRIVATE_API_KEY", PRIVATE_API_KEY)
 
         with fastapi.testclient.TestClient(asgi_app) as client:
             with client.stream(
                 "POST", "/private/api/blueprint/nonexistent",
                 json={"proposedSessionId": None},
-                headers={"Content-Type": "application/json"}
+                headers=PRIVATE_API_HEADERS
             ) as response:
 
                 assert response.status_code == 200
@@ -318,13 +327,14 @@ class TestServe:
     def test_create_blueprint_job_api_streaming_events(self, monkeypatch):
         asgi_app = writer.serve.get_asgi_app(test_app_dir, "run")
         monkeypatch.setenv("WRITER_SECRET_KEY", "abc")
+        monkeypatch.setenv("WRITER_PRIVATE_API_KEY", PRIVATE_API_KEY)
         blueprint_id = "8ffkuce0ermsm9dr"
 
         with fastapi.testclient.TestClient(asgi_app) as client:
             with client.stream(
                 "POST", f"/private/api/blueprint/{blueprint_id}",
                 json={"proposedSessionId": None},
-                headers={"Content-Type": "application/json"}
+                headers=PRIVATE_API_HEADERS
             ) as response:
 
                 events = parse_sse_stream(response)
@@ -348,6 +358,91 @@ class TestServe:
                 if event_type == "error":
                     assert "msg" in final_payload
                     assert "finished_at" in final_payload
+
+    @pytest.mark.parametrize("path", ["/private/api/blueprints", "/private/api/cron-triggers"])
+    def test_private_api_get_requires_auth(self, monkeypatch, path):
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "run")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            monkeypatch.delenv("WRITER_PRIVATE_API_KEY", raising=False)
+            assert client.get(path, headers=PRIVATE_API_HEADERS).status_code == 403
+
+            monkeypatch.setenv("WRITER_PRIVATE_API_KEY", PRIVATE_API_KEY)
+            assert client.get(path).status_code == 401
+            assert client.get(path, headers={"Authorization": "Bearer wrong"}).status_code == 401
+            assert client.get(path, headers=PRIVATE_API_HEADERS).status_code == 200
+
+    @pytest.mark.parametrize(
+        "headers,expected_status",
+        [
+            ({"Content-Type": "application/json"}, 401),
+            ({"Content-Type": "application/json", "Authorization": "Bearer wrong"}, 401),
+            ({"Content-Type": "text/plain", "Authorization": f"Bearer {PRIVATE_API_KEY}"}, 415),
+        ],
+    )
+    def test_create_blueprint_job_api_rejects_unauthorized(self, monkeypatch, headers, expected_status):
+        monkeypatch.setenv("WRITER_PRIVATE_API_KEY", PRIVATE_API_KEY)
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "run")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            res = client.post(
+                "/private/api/blueprint/8ffkuce0ermsm9dr",
+                content=json.dumps({"proposedSessionId": None}),
+                headers=headers,
+            )
+            assert res.status_code == expected_status
+
+    def test_create_blueprint_job_api_has_no_wildcard_cors(self, monkeypatch):
+        monkeypatch.setenv("WRITER_PRIVATE_API_KEY", PRIVATE_API_KEY)
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "run")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            with client.stream(
+                "POST", "/private/api/blueprint/8ffkuce0ermsm9dr",
+                json={}, headers=PRIVATE_API_HEADERS,
+            ) as response:
+                assert response.status_code == 200
+                assert "access-control-allow-origin" not in response.headers
+                parse_sse_stream(response)
+
+    @pytest.mark.parametrize(
+        "blueprint_id,query,body",
+        [
+            # Branch is a non-trigger block
+            ("m4gycroojx6am4cq", "?branch_id=pa448833kc2pis3a", {}),
+            # Branch is a UI trigger, not API/Cron
+            ("m4gycroojx6am4cq", "?branch_id=6o0ev5lml7kpb6ii", {}),
+            # Branch is an API trigger of another blueprint
+            ("m4gycroojx6am4cq", "?branch_id=lsoe57jb2dfbnj76", {}),
+            # Blueprint without API/Cron trigger, started from an inner block
+            ("n5tm1c8il2kpzttw", "?branch_id=nrdwc9v2jn1tvu84", {}),
+            # Path id is a block, not a blueprint
+            ("lsoe57jb2dfbnj76", "", {}),
+        ],
+    )
+    def test_create_blueprint_job_api_rejects_invalid_targets(self, monkeypatch, blueprint_id, query, body):
+        monkeypatch.setenv("WRITER_PRIVATE_API_KEY", PRIVATE_API_KEY)
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "run")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            with client.stream(
+                "POST", f"/private/api/blueprint/{blueprint_id}{query}",
+                json=body, headers=PRIVATE_API_HEADERS,
+            ) as response:
+                events = parse_sse_stream(response)
+                event_type, final_payload = events[-1]
+                assert event_type == "error"
+                assert not any(e[0] == "artifact" for e in events)
+
+    def test_create_blueprint_job_api_body_cannot_override_target(self, monkeypatch):
+        monkeypatch.setenv("WRITER_PRIVATE_API_KEY", PRIVATE_API_KEY)
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "run")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            with client.stream(
+                "POST", "/private/api/blueprint/8ffkuce0ermsm9dr",
+                json={"blueprint_id": "n5tm1c8il2kpzttw", "branch_id": "nrdwc9v2jn1tvu84"},
+                headers=PRIVATE_API_HEADERS,
+            ) as response:
+                events = parse_sse_stream(response)
+                event_type, final_payload = events[-1]
+                assert event_type == "artifact"
+                assert final_payload.get("artifact") == "987127"
 
     def test_health_endpoint_returns_ok_when_all_processes_running_run_mode(self):
         """
