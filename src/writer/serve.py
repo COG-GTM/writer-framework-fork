@@ -39,6 +39,9 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.routing import Mount
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
+from starlette.datastructures import Headers
+from starlette.responses import PlainTextResponse
+from starlette.types import ASGIApp, Receive, Scope, Send
 from starlette.websockets import WebSocket, WebSocketDisconnect, WebSocketState
 
 import writer
@@ -73,6 +76,58 @@ if typing.TYPE_CHECKING:
 MAX_WEBSOCKET_MESSAGE_SIZE = 201 * 1024 * 1024
 BLUEPRINT_API_EXECUTION_TIMEOUT_SECONDS = int(os.getenv("AGENT_BUILDER_BLUEPRINT_API_EXECUTION_TIMEOUT", "600"))
 BLUEPRINT_API_RETRY_TIMEOUT = int(os.getenv("AGENT_BUILDER_BLUEPRINT_API_RETRY_TIMEOUT", "10000"))
+
+
+LOCAL_HOSTNAMES = ("localhost", "127.0.0.1", "::1")
+SESSION_ID_HEADER = "x-writer-session-id"
+
+
+def _parse_hostname(host_header: Optional[str]) -> Optional[str]:
+    """
+    Extracts the hostname from a Host header value, handling ports and
+    bracketed IPv6 literals.
+
+    >>> _parse_hostname("localhost:4005")  # "localhost"
+    >>> _parse_hostname("[::1]:4005")  # "::1"
+    """
+    if not host_header:
+        return None
+    try:
+        return urlsplit(f"//{host_header}").hostname
+    except ValueError:
+        return None
+
+
+def _is_local_hostname(hostname: Optional[str]) -> bool:
+    return hostname in LOCAL_HOSTNAMES
+
+
+class LocalHostOnlyMiddleware:
+    """
+    Rejects HTTP and websocket requests whose Host header is not a loopback
+    name, so a DNS-rebound hostname cannot reach the local edit server.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] not in ("http", "websocket"):
+            await self.app(scope, receive, send)
+            return
+        hostname = _parse_hostname(Headers(scope=scope).get("host"))
+        if _is_local_hostname(hostname):
+            await self.app(scope, receive, send)
+            return
+        logging.error(
+            "A request with host %s was rejected. For security reasons, only local hosts are allowed in edit mode. "
+            "To circumvent this protection, use the --enable-remote-edit flag if running via command line.",
+            hostname,
+        )
+        if scope["type"] == "websocket":
+            await send({"type": "websocket.close", "code": 1008})
+            return
+        await PlainTextResponse("Invalid host header", status_code=400)(scope, receive, send)
 
 
 class WriterState(typing.Protocol):
@@ -174,6 +229,10 @@ def get_asgi_app(
     app.state.writer_app = True
     app.state.app_runner = app_runner
 
+    is_local_edit_only = serve_mode == "edit" and not enable_remote_edit
+    if is_local_edit_only:
+        app.add_middleware(LocalHostOnlyMiddleware)
+
     def _get_extension_paths() -> List[str]:
         extensions_path = pathlib.Path(user_app_path) / "extensions"
         if not extensions_path.exists():
@@ -189,14 +248,31 @@ def get_asgi_app(
     cached_extension_paths = _get_extension_paths()
 
     def _check_origin_header(origin_header: Optional[str]) -> bool:
-        if serve_mode not in ("edit") or enable_remote_edit is True:
+        if not is_local_edit_only:
             return True
         if origin_header is None:
             return False
-        hostname = urlsplit(origin_header).hostname
-        if hostname in ("127.0.0.1", "localhost"):
-            return True
-        return False
+        return _is_local_hostname(urlsplit(origin_header).hostname)
+
+    def _reject_foreign_origin(request: Request) -> None:
+        """
+        Blocks cross-site browser requests in local edit mode. Browsers always
+        send Origin on cross-origin and non-GET requests, so an absent Origin
+        means a same-origin GET or a non-browser client.
+        """
+        origin_header = request.headers.get("origin")
+        if origin_header is None or _check_origin_header(origin_header):
+            return
+        logging.error("A request to %s with origin %s was rejected.", request.url.path, origin_header)
+        raise HTTPException(status_code=403, detail="Incorrect origin. Only local origins are allowed.")
+
+    async def _require_edit_session(request: Request) -> None:
+        _reject_foreign_origin(request)
+        if not is_local_edit_only:
+            return
+        session_id = request.headers.get(SESSION_ID_HEADER)
+        if not session_id or not await app_runner.check_session(session_id):
+            raise HTTPException(status_code=403, detail="A valid edit session is required.")
 
     # Init
 
@@ -255,9 +331,10 @@ def get_asgi_app(
         return {"status": "ok"}
 
     @app.get("/api/export")
-    async def export_zip():
+    async def export_zip(request: Request):
         if serve_mode != "edit":
             raise HTTPException(status_code=403, detail="Invalid mode.")
+        await _require_edit_session(request)
         exported_zip_stream = app_runner.export_zip()
         return StreamingResponse(
             exported_zip_stream,
@@ -268,9 +345,10 @@ def get_asgi_app(
         )
 
     @app.post("/api/import")
-    async def import_zip(file: UploadFile = File(...)):
+    async def import_zip(request: Request, file: UploadFile = File(...)):
         if serve_mode != "edit":
             raise HTTPException(status_code=403, detail={"summary": "Invalid mode. Expected 'edit'"})
+        _reject_foreign_origin(request)
         if not file.filename or not file.filename.endswith(".zip"):
             raise HTTPException(status_code=400, detail={"summary": "Only .zip files are supported."})
 
@@ -304,8 +382,10 @@ def get_asgi_app(
             )
 
     @app.post("/api/data/retrieve")
-    async def retrieve_data(requestBody: RetrieveDataRequestBody) -> RetrieveDataResponseBody:
+    async def retrieve_data(requestBody: RetrieveDataRequestBody, request: Request) -> RetrieveDataResponseBody:
         from writer.keyvalue_storage import writer_kv_storage
+
+        _reject_foreign_origin(request)
 
         all_keys = writer_kv_storage.get_data_keys()
 
@@ -325,8 +405,10 @@ def get_asgi_app(
         return RetrieveDataResponseBody(result={k: v["data"] for k, v in kv_pairs})
 
     @app.post("/api/data/delete")
-    async def delete_data(requestBody: DeleteDataRequestBody) -> None:
+    async def delete_data(requestBody: DeleteDataRequestBody, request: Request) -> None:
         from writer.keyvalue_storage import writer_kv_storage
+
+        _reject_foreign_origin(request)
 
         async def delete_key(key: str):
             return key, await asyncio.to_thread(writer_kv_storage.delete, key)

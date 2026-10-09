@@ -366,7 +366,7 @@ class TestServe:
         Edit mode has 3 processes: main web server, user app process, and project saver process.
         """
         asgi_app = writer.serve.get_asgi_app(test_app_dir, "edit")
-        with fastapi.testclient.TestClient(asgi_app) as client:
+        with fastapi.testclient.TestClient(asgi_app, base_url="http://localhost") as client:
             res = client.get("/api/health")
             assert res.status_code == 200
             assert res.json() == {"status": "ok"}
@@ -394,7 +394,7 @@ class TestServe:
         Test that health endpoint returns 503 when project saver process is not running in edit mode.
         """
         asgi_app = writer.serve.get_asgi_app(test_app_dir, "edit")
-        with fastapi.testclient.TestClient(asgi_app) as client:
+        with fastapi.testclient.TestClient(asgi_app, base_url="http://localhost") as client:
             # Kill the project saver process
             app_runner = asgi_app.state.app_runner
             if app_runner.wf_project_context.write_files_async_process is not None:
@@ -406,3 +406,111 @@ class TestServe:
             response_json = res.json()
             assert response_json["status"] == "error"
             assert "Project saver process is not running" in response_json["message"]
+
+
+class TestEditServerLocalProtection:
+
+    @staticmethod
+    def _copy_app_with_secrets(tmp_path) -> str:
+        import shutil
+        app_dir = tmp_path / "app"
+        shutil.copytree(test_app_dir, app_dir, ignore=shutil.ignore_patterns("__pycache__"))
+        (app_dir / ".env").write_text("WRITER_API_KEY=secret")
+        (app_dir / ".env.local").write_text("WRITER_API_KEY=secret")
+        (app_dir / ".git").mkdir()
+        (app_dir / ".git" / "config").write_text("[remote]")
+        (app_dir / "server.pem").write_text("-----BEGIN PRIVATE KEY-----")
+        return str(app_dir)
+
+    @staticmethod
+    def _init_session(client) -> str:
+        res = client.post("/api/init", json={"proposedSessionId": None}, headers={
+            "Content-Type": "application/json",
+            "Origin": "http://localhost:4005",
+        })
+        assert res.status_code == 200
+        return res.json()["sessionId"]
+
+    def test_rebound_host_is_rejected(self, tmp_path) -> None:
+        asgi_app = writer.serve.get_asgi_app(self._copy_app_with_secrets(tmp_path), "edit")
+        with fastapi.testclient.TestClient(asgi_app, base_url="http://attacker.example:4005") as client:
+            assert client.get("/api/export").status_code == 400
+            assert client.get("/").status_code == 400
+            res = client.post("/api/data/retrieve", json={"key_contains": None, "skip_keys": []})
+            assert res.status_code == 400
+            with pytest.raises(Exception):
+                with client.websocket_connect("/api/stream"):
+                    pass
+
+    @pytest.mark.parametrize("base_url", [
+        "http://localhost:4005",
+        "http://127.0.0.1:4005",
+        "http://[::1]:4005",
+    ])
+    def test_local_hosts_are_accepted(self, tmp_path, base_url) -> None:
+        asgi_app = writer.serve.get_asgi_app(self._copy_app_with_secrets(tmp_path), "edit")
+        with fastapi.testclient.TestClient(asgi_app, base_url=base_url) as client:
+            assert client.get("/api/health").status_code == 200
+
+    def test_remote_edit_allows_any_host(self, tmp_path) -> None:
+        asgi_app = writer.serve.get_asgi_app(
+            self._copy_app_with_secrets(tmp_path), "edit", enable_remote_edit=True)
+        with fastapi.testclient.TestClient(asgi_app, base_url="http://editor.example.com") as client:
+            assert client.get("/api/health").status_code == 200
+
+    def test_run_mode_allows_any_host(self) -> None:
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "run")
+        with fastapi.testclient.TestClient(asgi_app, base_url="http://app.example.com") as client:
+            assert client.get("/api/health").status_code == 200
+
+    def test_export_requires_edit_session(self, tmp_path) -> None:
+        asgi_app = writer.serve.get_asgi_app(self._copy_app_with_secrets(tmp_path), "edit")
+        with fastapi.testclient.TestClient(asgi_app, base_url="http://localhost:4005") as client:
+            assert client.get("/api/export").status_code == 403
+            res = client.get("/api/export", headers={"X-Writer-Session-Id": "forged"})
+            assert res.status_code == 403
+
+    def test_export_excludes_secrets(self, tmp_path) -> None:
+        import io
+        import zipfile
+        asgi_app = writer.serve.get_asgi_app(self._copy_app_with_secrets(tmp_path), "edit")
+        with fastapi.testclient.TestClient(asgi_app, base_url="http://localhost:4005") as client:
+            session_id = self._init_session(client)
+            res = client.get("/api/export", headers={"X-Writer-Session-Id": session_id})
+            assert res.status_code == 200
+            names = zipfile.ZipFile(io.BytesIO(res.content)).namelist()
+            assert "main.py" in names
+            assert any(name.startswith(".wf/") for name in names)
+            assert not any(
+                name.startswith((".env", ".git/")) or name.endswith(".pem") for name in names
+            )
+
+    def test_export_rejects_foreign_origin(self, tmp_path) -> None:
+        asgi_app = writer.serve.get_asgi_app(self._copy_app_with_secrets(tmp_path), "edit")
+        with fastapi.testclient.TestClient(asgi_app, base_url="http://localhost:4005") as client:
+            session_id = self._init_session(client)
+            res = client.get("/api/export", headers={
+                "X-Writer-Session-Id": session_id,
+                "Origin": "http://attacker.example",
+            })
+            assert res.status_code == 403
+
+    @pytest.mark.parametrize("path,body", [
+        ("/api/data/retrieve", {"key_contains": None, "skip_keys": []}),
+        ("/api/data/delete", {"keys": []}),
+    ])
+    def test_data_routes_reject_foreign_origin(self, tmp_path, path, body) -> None:
+        asgi_app = writer.serve.get_asgi_app(self._copy_app_with_secrets(tmp_path), "edit")
+        with fastapi.testclient.TestClient(asgi_app, base_url="http://localhost:4005") as client:
+            res = client.post(path, json=body, headers={"Origin": "http://attacker.example"})
+            assert res.status_code == 403
+
+    def test_import_rejects_foreign_origin(self, tmp_path) -> None:
+        asgi_app = writer.serve.get_asgi_app(self._copy_app_with_secrets(tmp_path), "edit")
+        with fastapi.testclient.TestClient(asgi_app, base_url="http://localhost:4005") as client:
+            res = client.post(
+                "/api/import",
+                files={"file": ("agent.zip", b"PK", "application/zip")},
+                headers={"Origin": "http://attacker.example"},
+            )
+            assert res.status_code == 403

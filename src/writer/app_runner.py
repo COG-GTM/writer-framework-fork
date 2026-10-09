@@ -66,6 +66,22 @@ from writer.wf_project import WfProjectContext
 
 user_code_logger = logging.getLogger("user_code")
 
+EXPORT_INCLUDED_HIDDEN_DIRS = {".wf"}
+EXPORT_EXCLUDED_DIRS = {"__pycache__", "node_modules"}
+EXPORT_EXCLUDED_SUFFIXES = (".pyc", ".pem", ".key", ".p12", ".pfx")
+
+
+def _is_excluded_from_export(name: str, is_dir: bool) -> bool:
+    """
+    Keeps secrets (.env*, .git, keys) and other hidden files out of project
+    exports. The .wf directory holds the project definition and is kept.
+    """
+    if is_dir:
+        if name in EXPORT_INCLUDED_HIDDEN_DIRS:
+            return False
+        return name.startswith(".") or name in EXPORT_EXCLUDED_DIRS
+    return name.startswith(".") or name.lower().endswith(EXPORT_EXCLUDED_SUFFIXES)
+
 
 class MessageHandlingException(Exception):
     pass
@@ -1133,8 +1149,9 @@ class AppRunner:
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
             for root, dirs, files in os.walk(self.app_path):
+                dirs[:] = [d for d in dirs if not _is_excluded_from_export(d, is_dir=True)]
                 for file in files:
-                    if file.endswith('.pyc'):
+                    if _is_excluded_from_export(file, is_dir=False):
                         continue
                     full_path = os.path.join(root, file)
                     arcname = os.path.relpath(full_path, start=self.app_path)

@@ -345,3 +345,20 @@ class TestAppRunner:
 
             # Then
             assert res.payload.result["result"] is not None
+
+
+@pytest.mark.parametrize("name,is_dir,excluded", [
+    (".env", False, True),
+    (".env.production", False, True),
+    (".git", True, True),
+    (".venv", True, True),
+    ("__pycache__", True, True),
+    ("server.pem", False, True),
+    ("main.cpython-312.pyc", False, True),
+    (".wf", True, False),
+    ("main.py", False, False),
+    ("static", True, False),
+])
+def test_is_excluded_from_export(name, is_dir, excluded) -> None:
+    from writer.app_runner import _is_excluded_from_export
+    assert _is_excluded_from_export(name, is_dir=is_dir) is excluded
