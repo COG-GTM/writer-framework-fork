@@ -12,6 +12,7 @@ from typing import (
     Iterable,
     List,
     Literal,
+    NamedTuple,
     Optional,
     Set,
     TypedDict,
@@ -71,7 +72,16 @@ DEFAULT_CHAT_MODEL = "palmyra-x5"
 DEFAULT_COMPLETION_MODEL = "palmyra-x5"
 
 
-_ai_client: ContextVar[Optional[Writer]] = ContextVar(
+class _BoundClient(NamedTuple):
+    """A cached SDK client and the credentials/HTTPX client it was built for."""
+    client: Writer
+    api_key: Optional[str]
+    session_id: Optional[str]
+    agent_token: Optional[str]
+    http_client: Optional[DefaultHttpxClient]
+
+
+_ai_client: ContextVar[Optional[_BoundClient]] = ContextVar(
     "ai_client", default=None
 )
 
@@ -308,38 +318,51 @@ class WriterAIManager:
         # Acquire header from session and set it to the client.
         # Also resolve the agent ID from the session header for
         # body-based attribution (see get_attribution_extra_body).
-        # We use a ContextVar because AppProcess dispatches requests
-        # concurrently via a ThreadPoolExecutor, so a class-level
-        # attribute would race between sessions.
+        # The cached client is only reused when it was built for the
+        # same API key, session, agent token and (open) HTTPX client:
+        # AppProcess worker threads are pooled, so a context may outlive
+        # the request.
 
         current_session = get_session()
+        session_headers = (current_session.headers or {}) if current_session else {}
+        session_id = getattr(current_session, "session_id", None)
+        agent_token = session_headers.get("x-agent-token") or None
         custom_headers: Dict[str, str] = {}
+        if agent_token:
+            custom_headers["X-Agent-Token"] = agent_token
 
-        if current_session:
-            session_headers = current_session.headers or {}
-            agent_token_header = session_headers.get("x-agent-token")
-            if agent_token_header:
-                custom_headers["X-Agent-Token"] = agent_token_header
-
-        _ai_agent_id.set(
-            (current_session.headers or {}).get("x-agent-id")
-            if current_session
-            else None
-        )
+        _ai_agent_id.set(session_headers.get("x-agent-id"))
 
         try:
-            context_client = _ai_client.get(None)
-            if force_new_client or not context_client:
-                client = Writer(
-                    api_key=instance.token,
-                    default_headers=custom_headers,
-                    http_client=custom_httpx_client,
-                    max_retries=10,
-                    )
-                _ai_client.set(client)
-                return client
-            else:
-                return context_client
+            bound = _ai_client.get(None)
+            if (
+                not force_new_client
+                and bound is not None
+                and bound.api_key == instance.token
+                and bound.session_id == session_id
+                and bound.agent_token == agent_token
+                and (
+                    custom_httpx_client is None
+                    or custom_httpx_client is bound.http_client
+                )
+                and not getattr(bound.http_client, "is_closed", False)
+            ):
+                return bound.client
+
+            client = Writer(
+                api_key=instance.token,
+                default_headers=custom_headers,
+                http_client=custom_httpx_client,
+                max_retries=10,
+                )
+            _ai_client.set(_BoundClient(
+                client=client,
+                api_key=instance.token,
+                session_id=session_id,
+                agent_token=agent_token,
+                http_client=custom_httpx_client,
+            ))
+            return client
         except WriterError:
             raise RuntimeError(
                 "Failed to acquire Writer API key. " +

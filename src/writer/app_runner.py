@@ -1,5 +1,6 @@
 import asyncio
 import concurrent.futures
+import contextvars
 import importlib.util
 import io
 import logging
@@ -607,7 +608,13 @@ class AppProcess(multiprocessing.Process):
     ) -> AppProcessServerResponsePacket:
         response = None
         try:
-            response = self._handle_message(session_id, request)
+            # Pooled worker threads keep their contextvars between tasks,
+            # so each message runs in a fresh context to keep request
+            # state (e.g. the session-bound Writer AI client) from leaking
+            # into the next session served by the same thread.
+            response = contextvars.Context().run(
+                self._handle_message, session_id, request
+            )
         except (MessageHandlingException, ValidationError) as e:
             response = AppProcessServerResponse(
                 status="error", status_message=repr(e), payload=None
