@@ -301,13 +301,25 @@ def get_asgi_app(
     autogen_in_flight: Set[str] = set()
     autogen_history: Dict[str, Deque[float]] = {}
 
+    def _prune_autogen_history(now: float) -> None:
+        for sid in list(autogen_history):
+            history = autogen_history[sid]
+            while history and now - history[0] >= AUTOGEN_RATE_LIMIT_WINDOW_SECONDS:
+                history.popleft()
+            if not history:
+                del autogen_history[sid]
+
+    def _release_autogen_slot(session_id: str, worker: "asyncio.Future[Any]") -> None:
+        autogen_in_flight.discard(session_id)
+        if not worker.cancelled():
+            worker.exception()
+
     def _reserve_autogen_slot(session_id: str) -> None:
         if session_id in autogen_in_flight:
             raise HTTPException(status_code=429, detail="An autogen request is already running for this session.")
         now = time.monotonic()
+        _prune_autogen_history(now)
         history = autogen_history.setdefault(session_id, deque())
-        while history and now - history[0] >= AUTOGEN_RATE_LIMIT_WINDOW_SECONDS:
-            history.popleft()
         if len(history) >= AUTOGEN_RATE_LIMIT_MAX_REQUESTS:
             raise HTTPException(status_code=429, detail="Too many autogen requests. Try again later.")
         history.append(now)
@@ -330,17 +342,18 @@ def get_asgi_app(
         except ValidationError as e:
             raise RequestValidationError(e.errors()) from e
 
+        import writer.autogen
+        agent_token_header = request.headers.get('x-agent-token')
+
         _reserve_autogen_slot(session_id)
-        try:
-            import writer.autogen
-            agent_token_header = request.headers.get('x-agent-token')
-            return await asyncio.to_thread(
-                writer.autogen.generate_blueprint,
-                requestBody.description,
-                agent_token_header
-            )
-        finally:
-            autogen_in_flight.discard(session_id)
+        # The slot is held until the worker thread finishes, even if the client disconnects.
+        worker = asyncio.ensure_future(asyncio.to_thread(
+            writer.autogen.generate_blueprint,
+            requestBody.description,
+            agent_token_header
+        ))
+        worker.add_done_callback(lambda w: _release_autogen_slot(session_id, w))
+        return await asyncio.shield(worker)
 
     @app.post("/api/data/retrieve")
     async def retrieve_data(requestBody: RetrieveDataRequestBody) -> RetrieveDataResponseBody:
