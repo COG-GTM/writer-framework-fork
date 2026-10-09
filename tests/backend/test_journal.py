@@ -411,9 +411,9 @@ class TestJournalDataRoutes:
     @pytest.fixture
     def kv(self, mock_kv_storage, monkeypatch):
         monkeypatch.setattr(writer.keyvalue_storage, "writer_kv_storage", mock_kv_storage)
-        mock_kv_storage.save("wf-journal-a-1", {"result": "success"})
-        mock_kv_storage.save("wf-init-logs-a-1", {"stdout": "hi"})
-        mock_kv_storage.save("customer-record", {"email": "user@example.com"})
+        mock_kv_storage._data_storage["wf-journal-a-1"] = {"data": {"result": "success"}}
+        mock_kv_storage._data_storage["wf-init-logs-a-1"] = {"data": {"stdout": "hi"}}
+        mock_kv_storage._data_storage["customer-record"] = {"data": {"email": "user@example.com"}}
         return mock_kv_storage
 
     def test_retrieve_rejected_in_run_mode(self, kv):
