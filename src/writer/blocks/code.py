@@ -4,7 +4,7 @@ import traceback
 from typing import Any
 
 from writer.abstract import register_abstract_template
-from writer.blocks.base_block import BlueprintBlock
+from writer.blocks.base_block import BlueprintBlock, format_as_code_block
 from writer.logs import use_logging_redirect, use_stdout_redirect
 from writer.ss_types import AbstractTemplate
 
@@ -97,6 +97,5 @@ class CodeBlock(BlueprintBlock):
             self.outcome = "success"
         except BaseException as e:
             self.outcome = "error"
-            # Wrap the message as a preformatted block to display as "raw" text in Markdown
-            self.message = f"<pre>{traceback.format_exc()}</pre>"
+            self.message = format_as_code_block(traceback.format_exc())
             raise e

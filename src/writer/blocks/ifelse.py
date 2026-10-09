@@ -2,7 +2,7 @@ import sys
 import traceback
 
 from writer.abstract import register_abstract_template
-from writer.blocks.base_block import BlueprintBlock
+from writer.blocks.base_block import BlueprintBlock, format_as_code_block
 from writer.ss_types import AbstractTemplate
 
 
@@ -67,5 +67,5 @@ class IfElseBlock(BlueprintBlock):
                 self.outcome = "false"
         except BaseException:
             self.outcome = "error"
-            self.message = f"<pre>{traceback.format_exc()}</pre>"
+            self.message = format_as_code_block(traceback.format_exc())
             raise
