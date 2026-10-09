@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import urllib.parse
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import writer.core
@@ -36,7 +37,14 @@ class Evaluator:
         as_json=False,
         default_field_value="",
         base_context={},
+        url_encode=False,
     ) -> Any:
+        """
+        With ``url_encode``, values of templates embedded in a larger string are
+        percent-encoded so they can't change the structure of a URL. A template
+        at the very start of the field is left as is, so it can provide a base URL.
+        """
+
         def decode_json(text):
             if not isinstance(text, str):
                 return text
@@ -71,9 +79,10 @@ class Evaluator:
                 else:
                     dumped = json.dumps(dumped)[1:-1]
                 return re.sub(r'(?<!\\)"', r'\"', dumped)
-            if not isinstance(expr_value, str):
-                return json.dumps(expr_value)
-            return expr_value
+            text = expr_value if isinstance(expr_value, str) else json.dumps(expr_value)
+            if url_encode and matched.start() > 0:
+                return urllib.parse.quote(text, safe="")
+            return text
 
         if full_match is None:
             replaced = self.TEMPLATE_REGEX.sub(replacer, field_value)

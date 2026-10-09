@@ -72,14 +72,26 @@ class BlueprintBlock:
                 f"The field `{field_key}` is required. It was left empty."
             )
 
-    def _get_field(self, field_key: str, as_json=False, default_field_value=None, required=False):
+    def _get_field(
+        self,
+        field_key: str,
+        as_json=False,
+        default_field_value=None,
+        required=False,
+        url_encode=False,
+    ):
         if default_field_value is None:
             if as_json:
                 default_field_value = "{}"
             else:
                 default_field_value = ""
         value = self.evaluator.evaluate_field(
-            self.instance_path, field_key, as_json, default_field_value, self.execution_environment
+            self.instance_path,
+            field_key,
+            as_json,
+            default_field_value,
+            self.execution_environment,
+            url_encode=url_encode,
         )
 
         if required and (value is None or value == "" or value == {}):
