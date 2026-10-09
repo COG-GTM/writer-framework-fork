@@ -1,3 +1,5 @@
+import threading
+import time
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from threading import Event
@@ -6,7 +8,18 @@ from unittest.mock import MagicMock
 
 import pytest
 from writer.blocks.base_block import BlueprintBlock, BlueprintBlock_T
-from writer.blueprints import MAX_DAG_DEPTH, BlueprintRunManager, Graph, GraphBuilder, GraphRunner
+from writer.blueprints import (
+    DEFAULT_MAX_CONCURRENT_RUNS_PER_SESSION,
+    MAX_DAG_DEPTH,
+    BlueprintNodeExecutor,
+    BlueprintRunLimitExceeded,
+    BlueprintRunManager,
+    BlueprintRunner,
+    Graph,
+    GraphBuilder,
+    GraphRunner,
+    use_current_block,
+)
 from writer.core_ui import Component
 
 
@@ -116,6 +129,10 @@ class MockRunner:
     def cancel_blueprint_execution(self, run_id: str):
         self.run_manager.cancel_run(run_id)
 
+    @contextmanager
+    def admit_run(self):
+        yield
+
 MockBlock.register("mock_block")
 
 def create_component(id: str, outs=[], fields=None):
@@ -125,6 +142,34 @@ def create_component(id: str, outs=[], fields=None):
         outs=outs,
         content=fields or {}
     )
+
+
+class NodeExecutorRunner(MockRunner):
+    def __init__(self, node_executor: BlueprintNodeExecutor):
+        super().__init__()
+        self.node_executor = node_executor
+
+    @contextmanager
+    def _get_executor(self):
+        yield self.node_executor
+
+
+def run_in_thread(fn, timeout: float = 10):
+    outcome: Dict = {}
+
+    def target():
+        try:
+            outcome["result"] = fn()
+        except BaseException as e:
+            outcome["error"] = e
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    thread.join(timeout)
+    assert not thread.is_alive(), "Blueprint execution deadlocked"
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome.get("result")
 
 
 class TestBasicExecution:
@@ -515,6 +560,219 @@ class TestBranchExecution:
         assert node.inputs == []
         dummy_node = graph.get_node("dummy")
         assert dummy_node is None
+
+
+class TestNodeExecutor:
+    def test_runs_inline_when_no_worker_is_free(self):
+        executor = BlueprintNodeExecutor(1)
+        release = Event()
+        try:
+            busy = executor.submit(release.wait, 5)
+            inline = executor.submit(threading.get_ident)
+            assert inline.done()
+            assert inline.result() == threading.get_ident()
+        finally:
+            release.set()
+            assert busy.result() is True
+            executor.shutdown()
+
+    def test_inline_exception_is_set_on_future(self):
+        executor = BlueprintNodeExecutor(1)
+        release = Event()
+
+        def fail():
+            raise ValueError("boom")
+
+        try:
+            executor.submit(release.wait, 5)
+            future = executor.submit(fail)
+            assert isinstance(future.exception(), ValueError)
+        finally:
+            release.set()
+            executor.shutdown()
+
+    def test_worker_slot_is_released(self):
+        executor = BlueprintNodeExecutor(1)
+        try:
+            executor.submit(lambda: None).result()
+            deadline = time.time() + 2
+            while True:
+                future = executor.submit(threading.get_ident)
+                if future.result() != threading.get_ident() or time.time() > deadline:
+                    break
+                time.sleep(0.01)
+            assert future.result() != threading.get_ident()
+        finally:
+            executor.shutdown()
+
+    def test_defers_outside_workers_and_runs_inline_inside(self):
+        executor = BlueprintNodeExecutor(1)
+        release = Event()
+        try:
+            busy = executor.submit(lambda: (
+                executor.submit_or_defer(threading.get_ident).result(),
+                threading.get_ident(),
+                release.wait(5),
+            ))
+            assert executor.submit_or_defer(threading.get_ident) is None
+            release.set()
+            inline_ident, worker_ident, _ = busy.result(timeout=5)
+            assert inline_ident == worker_ident
+        finally:
+            release.set()
+            executor.shutdown()
+
+    def test_saturated_pool_does_not_block_cancellation(self):
+        runner = NodeExecutorRunner(BlueprintNodeExecutor(1))
+        release = Event()
+        ran = Event()
+        graph = GraphBuilder(components=[
+            create_component("N1", fields={"callback": lambda env: ran.set()}),
+        ], tools=tools).build()
+        graph_runner = GraphRunner(graph=graph, execution_environment={}, runner=runner, title="Test Execution")
+        graph_runner.CANCELATION_CHECK_INTERVAL = 0.01
+
+        def cancel_until_stopped():
+            while not done.is_set():
+                runner.run_manager.cancel_run(graph_runner.run_id)
+                time.sleep(0.01)
+
+        done = Event()
+        try:
+            runner.node_executor.submit(release.wait, 10)
+            canceller = threading.Thread(target=cancel_until_stopped, daemon=True)
+            canceller.start()
+            try:
+                assert run_in_thread(graph_runner.run, timeout=5) is None
+            finally:
+                done.set()
+            assert not ran.is_set()
+        finally:
+            release.set()
+            runner.node_executor.shutdown()
+
+    def test_nested_runs_complete_with_single_worker(self):
+        runner = NodeExecutorRunner(BlueprintNodeExecutor(1))
+
+        def inner_graph():
+            return GraphBuilder(components=[
+                create_component("I1"),
+                create_component("I2", fields={"return_value": "inner"}),
+            ], tools=tools).build()
+
+        def middle_graph():
+            return GraphBuilder(components=[
+                create_component("M1", fields={
+                    "callback": lambda env: run_graph(inner_graph(), env, runner),
+                }, outs=[{"toNodeId": "M2", "outId": "success"}]),
+                create_component("M2", fields={"return_value": "middle"}),
+            ], tools=tools).build()
+
+        outer = GraphBuilder(components=[
+            create_component("O1", fields={"callback": lambda env: run_graph(middle_graph(), env, runner)}),
+            create_component("O2", fields={"callback": lambda env: run_graph(middle_graph(), env, runner)}),
+        ], tools=tools).build()
+
+        try:
+            run_in_thread(lambda: run_graph(outer, runner=runner))
+        finally:
+            runner.node_executor.shutdown()
+        assert graph_outcomes(outer) == {"O1": "success", "O2": "success"}
+
+    def test_burst_of_waiting_handlers_completes(self):
+        handler_pool = ThreadPoolExecutor(2)
+        runner = NodeExecutorRunner(BlueprintNodeExecutor(2))
+
+        def handler():
+            graph = GraphBuilder(components=[
+                create_component("N1", fields={"callback": lambda env: time.sleep(0.01)}),
+                create_component("N2", fields={"callback": lambda env: time.sleep(0.01)}),
+                create_component("N3", fields={"callback": lambda env: time.sleep(0.01)}),
+            ], tools=tools).build()
+            run_graph(graph, runner=runner)
+            return graph_outcomes(graph)
+
+        try:
+            futures = [handler_pool.submit(handler) for _ in range(8)]
+            done, not_done = wait(futures, timeout=10)
+            assert not not_done, "Blueprint execution deadlocked"
+            for future in done:
+                assert set(future.result().values()) == {"success"}
+        finally:
+            handler_pool.shutdown(wait=False)
+            runner.node_executor.shutdown()
+
+
+def graph_outcomes(graph: Graph) -> Dict[str, Optional[str]]:
+    return {node.id: node.outcome for node in graph.nodes}
+
+
+class TestRunAdmission:
+    def create_runner(self, limit: int) -> BlueprintRunner:
+        runner = BlueprintRunner(MagicMock())
+        runner.max_concurrent_runs = limit
+        return runner
+
+    def test_default_limit(self, monkeypatch):
+        monkeypatch.delenv("WRITER_MAX_CONCURRENT_BLUEPRINT_RUNS_PER_SESSION", raising=False)
+        assert BlueprintRunner(MagicMock()).max_concurrent_runs == DEFAULT_MAX_CONCURRENT_RUNS_PER_SESSION
+
+    def test_limit_from_env(self, monkeypatch):
+        monkeypatch.setenv("WRITER_MAX_CONCURRENT_BLUEPRINT_RUNS_PER_SESSION", "3")
+        assert BlueprintRunner(MagicMock()).max_concurrent_runs == 3
+        monkeypatch.setenv("WRITER_MAX_CONCURRENT_BLUEPRINT_RUNS_PER_SESSION", "x")
+        assert BlueprintRunner(MagicMock()).max_concurrent_runs == DEFAULT_MAX_CONCURRENT_RUNS_PER_SESSION
+
+    def test_rejects_runs_over_limit(self):
+        runner = self.create_runner(1)
+        with runner.admit_run():
+            with pytest.raises(BlueprintRunLimitExceeded):
+                with runner.admit_run():
+                    pass
+        with runner.admit_run():
+            pass
+
+    def test_nested_runs_are_not_counted(self):
+        runner = self.create_runner(1)
+        with runner.admit_run():
+            with use_current_block(MagicMock()):
+                with runner.admit_run():
+                    pass
+
+    def test_zero_disables_limit(self):
+        runner = self.create_runner(0)
+        with runner.admit_run():
+            with runner.admit_run():
+                pass
+
+    def test_graph_runner_enforces_limit(self):
+        runner = self.create_runner(1)
+        release = Event()
+        started = Event()
+
+        def block(env):
+            started.set()
+            release.wait(5)
+
+        first = GraphBuilder(components=[
+            create_component("N1", fields={"callback": block}),
+        ], tools=tools).build()
+        second = GraphBuilder(components=[create_component("N1")], tools=tools).build()
+
+        pool = ThreadPoolExecutor(1)
+        try:
+            future = pool.submit(GraphRunner(first, {}, runner).run)
+            assert started.wait(5)
+            with pytest.raises(BlueprintRunLimitExceeded):
+                GraphRunner(second, {}, runner).run()
+        finally:
+            release.set()
+            future.result(timeout=5)
+            pool.shutdown()
+        assert graph_outcomes(first) == {"N1": "success"}
+        GraphRunner(second, {}, runner).run()
+        assert graph_outcomes(second) == {"N1": "success"}
+
 
 
 # class TestCancellation:

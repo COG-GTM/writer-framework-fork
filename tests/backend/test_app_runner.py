@@ -1,9 +1,11 @@
 import asyncio
 import threading
+from unittest.mock import MagicMock
 
 import pytest
-from writer.app_runner import AppRunner
+from writer.app_runner import AppProcess, AppRunner
 from writer.ss_types import (
+    AppProcessServerRequest,
     EventRequest,
     InitSessionRequest,
     InitSessionRequestPayload,
@@ -345,3 +347,30 @@ class TestAppRunner:
 
             # Then
             assert res.payload.result["result"] is not None
+
+
+class TestAppProcessControlRequests:
+    def event_request(self, handler):
+        return AppProcessServerRequest(type="event", payload={"type": "wf-click", "handler": handler})
+
+    def test_stop_blueprint_run_is_control_request(self) -> None:
+        assert AppProcess._is_control_request(self.event_request("stop_blueprint_run"))
+
+    def test_check_session_is_control_request(self) -> None:
+        assert AppProcess._is_control_request(AppProcessServerRequest(type="checkSession", payload=None))
+
+    def test_other_requests_are_not_control_requests(self) -> None:
+        assert not AppProcess._is_control_request(self.event_request("run_blueprint_by_id"))
+        assert not AppProcess._is_control_request(self.event_request(None))
+        assert not AppProcess._is_control_request(AppProcessServerRequest(type="stateEnquiry", payload=None))
+
+    def test_control_requests_bypass_event_pool(self) -> None:
+        process = AppProcess.__new__(AppProcess)
+        process.executor = MagicMock()
+        process.control_executor = MagicMock()
+
+        process._handle_app_process_server_packet((1, "session", self.event_request("stop_blueprint_run")))
+        process._handle_app_process_server_packet((2, "session", self.event_request("run_blueprint_by_id")))
+
+        assert process.control_executor.submit.call_count == 1
+        assert process.executor.submit.call_count == 1
