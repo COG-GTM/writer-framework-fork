@@ -216,20 +216,35 @@ function calculateColorStep(s: string, stepsLength = COLOR_STEPS.length) {
 	return step;
 }
 
+const CSS_VAR_COLOR = /^var\(--[\w-]+\)$/;
+const CSS_COLOR_KEYWORDS = new Set(["transparent", "currentcolor"]);
+
+function isSafeCssColor(color: unknown): color is string {
+	if (typeof color !== "string") return false;
+	const value = color.trim();
+	return (
+		chroma.valid(value) ||
+		CSS_VAR_COLOR.test(value) ||
+		CSS_COLOR_KEYWORDS.has(value.toLowerCase())
+	);
+}
+
 function toCssColor(color: unknown): string | undefined {
-	if (typeof color !== "string" || !chroma.valid(color)) return undefined;
-	return chroma(color).css();
+	if (!isSafeCssColor(color)) return undefined;
+	const value = color.trim();
+	return chroma.valid(value) ? chroma(value).css() : value;
 }
 
 function getAnnotationBgColor(content: AnnotatedTextElementArray) {
 	const color = content[2];
-	if (typeof color === "string" && chroma.valid(color)) return color;
+	if (isSafeCssColor(color)) return color;
 	return generateColor(content[1]);
 }
 
 function generateColor(s: string) {
 	if (!fields.rotateHue.value) {
-		return toCssColor(fields.referenceColor.value);
+		const referenceColor = fields.referenceColor.value;
+		return isSafeCssColor(referenceColor) ? referenceColor : undefined;
 	}
 
 	const baseColor = chroma(fields.referenceColor.value);

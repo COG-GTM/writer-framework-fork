@@ -108,6 +108,7 @@ describe("CoreAnnotatedText", async () => {
 								'red;position:fixed;inset:0;z-index:9999" title="x',
 							],
 							["ok", "Noun", "#faf"],
+							["themed", "Noun", "var(--accentColor)"],
 						]),
 						seed: ref(1),
 						useMarkdown: ref(true),
@@ -133,7 +134,7 @@ describe("CoreAnnotatedText", async () => {
 
 		await flushPromises();
 		const annotations = wrapper.findAll(".CoreAnnotatedText__annotation");
-		expect(annotations).toHaveLength(2);
+		expect(annotations).toHaveLength(3);
 		// invalid color falls back to the reference color
 		expect(annotations.at(0).attributes().style).not.toContain("fixed");
 		expect(annotations.at(0).attributes().title).toBeUndefined();
@@ -141,6 +142,9 @@ describe("CoreAnnotatedText", async () => {
 		expect(annotations.at(0).find("form").exists()).toBe(false);
 		expect(annotations.at(1).attributes().style).toContain(
 			"rgb(255,170,255)",
+		);
+		expect(annotations.at(2).attributes().style).toContain(
+			"var(--accentColor)",
 		);
 	});
 });
