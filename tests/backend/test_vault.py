@@ -162,12 +162,24 @@ def test_returned_secrets_are_a_copy(backend, clock):
     assert vault.get_secrets() == {"API_TOKEN": "s3cret"}
 
 
-def test_missing_vault_is_cached_as_empty(backend, clock):
+def test_missing_vault_is_rechecked_without_error_backoff(backend, clock):
     backend.responses = [httpx.Response(404, json={"detail": "not found"})]
     vault = backend.make_vault()
 
     assert vault.get_secrets() == {}
     assert vault.get_secrets() == {}
-
-    assert vault.secrets == {}
+    assert vault.secrets is None
     assert len(backend.requests) == 1
+
+    clock.now += WriterVault.RETRY_MAX_SECONDS
+    assert vault.get_secrets() == {"API_TOKEN": "s3cret"}
+    assert len(backend.requests) == 2
+
+
+def test_backoff_does_not_overflow_after_many_failures(backend, clock):
+    vault = backend.make_vault()
+    vault._consecutive_failures = 5000
+    backend.responses = [httpx.Response(503)]
+
+    assert vault.get_secrets() == {}
+    assert vault._next_retry_at - clock.now == WriterVault.RETRY_MAX_SECONDS

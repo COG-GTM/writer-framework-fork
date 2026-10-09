@@ -22,6 +22,8 @@ from writer.keyvalue_storage import KeyValueStorage, writer_kv_storage
 
 logger = logging.getLogger("vault")
 
+_VAULT_NOT_FOUND: Dict = {}
+
 
 class WriterVault:
     """Manages retrieval and caching of secrets from the Writer vault service."""
@@ -42,7 +44,9 @@ class WriterVault:
         Get cached secrets, fetching from vault if not already loaded.
 
         Failed fetches are not cached: an empty dict is returned and the fetch
-        is retried on a later call, with exponential backoff.
+        is retried on a later call, with exponential backoff. A missing vault
+        (404) is re-checked every RETRY_MAX_SECONDS so newly created secrets
+        are picked up without a restart.
         """
         with self._lock:
             if self.secrets is None and time.monotonic() >= self._next_retry_at:
@@ -56,12 +60,14 @@ class WriterVault:
 
     def _load(self) -> None:
         secrets = self._fetch()
+        if secrets is _VAULT_NOT_FOUND:
+            self._consecutive_failures = 0
+            self._next_retry_at = time.monotonic() + self.RETRY_MAX_SECONDS
+            return
         if secrets is None:
             self._consecutive_failures += 1
-            delay = min(
-                self.RETRY_BASE_SECONDS * (2 ** (self._consecutive_failures - 1)),
-                self.RETRY_MAX_SECONDS,
-            )
+            exponent = min(self._consecutive_failures - 1, 16)
+            delay = min(self.RETRY_BASE_SECONDS * (2**exponent), self.RETRY_MAX_SECONDS)
             self._next_retry_at = time.monotonic() + delay
             return
         self.secrets = secrets
@@ -81,7 +87,7 @@ class WriterVault:
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
                 logger.info("No vault secrets configured for this agent")
-                return {}
+                return _VAULT_NOT_FOUND
             logger.error("Failed to fetch vault secrets: %s", e)
         except (httpx.HTTPError, ValueError) as e:
             logger.error("Failed to fetch vault secrets: %s", e)
