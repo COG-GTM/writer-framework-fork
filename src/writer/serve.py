@@ -15,12 +15,14 @@ import textwrap
 import time
 import traceback
 import typing
+from collections import deque
 from contextlib import asynccontextmanager, suppress
 from importlib.machinery import ModuleSpec
 from typing import (
     Any,
     AsyncGenerator,
     Callable,
+    Deque,
     Dict,
     List,
     Optional,
@@ -35,6 +37,7 @@ from urllib.parse import urlsplit
 import orjson
 import uvicorn
 from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.routing import Mount
 from fastapi.staticfiles import StaticFiles
@@ -73,6 +76,8 @@ if typing.TYPE_CHECKING:
 MAX_WEBSOCKET_MESSAGE_SIZE = 201 * 1024 * 1024
 BLUEPRINT_API_EXECUTION_TIMEOUT_SECONDS = int(os.getenv("AGENT_BUILDER_BLUEPRINT_API_EXECUTION_TIMEOUT", "600"))
 BLUEPRINT_API_RETRY_TIMEOUT = int(os.getenv("AGENT_BUILDER_BLUEPRINT_API_RETRY_TIMEOUT", "10000"))
+AUTOGEN_RATE_LIMIT_MAX_REQUESTS = int(os.getenv("WRITER_AUTOGEN_RATE_LIMIT_MAX_REQUESTS", "5"))
+AUTOGEN_RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("WRITER_AUTOGEN_RATE_LIMIT_WINDOW_SECONDS", "300"))
 
 
 class WriterState(typing.Protocol):
@@ -293,15 +298,62 @@ def get_asgi_app(
         except ValueError as e:
             raise HTTPException(status_code=400, detail={"summary": "Invalid archive contents", "details": traceback.format_exc()}) from e
 
+    autogen_in_flight: Set[str] = set()
+    autogen_history: Dict[str, Deque[float]] = {}
+
+    def _prune_autogen_history(now: float) -> None:
+        for sid in list(autogen_history):
+            history = autogen_history[sid]
+            while history and now - history[0] >= AUTOGEN_RATE_LIMIT_WINDOW_SECONDS:
+                history.popleft()
+            if not history:
+                del autogen_history[sid]
+
+    def _release_autogen_slot(session_id: str, worker: "asyncio.Future[Any]") -> None:
+        autogen_in_flight.discard(session_id)
+        if not worker.cancelled():
+            worker.exception()
+
+    def _reserve_autogen_slot(session_id: str) -> None:
+        if session_id in autogen_in_flight:
+            raise HTTPException(status_code=429, detail="An autogen request is already running for this session.")
+        now = time.monotonic()
+        _prune_autogen_history(now)
+        history = autogen_history.setdefault(session_id, deque())
+        if len(history) >= AUTOGEN_RATE_LIMIT_MAX_REQUESTS:
+            raise HTTPException(status_code=429, detail="Too many autogen requests. Try again later.")
+        history.append(now)
+        autogen_in_flight.add(session_id)
+
     @app.post("/api/autogen")
-    async def autogen(requestBody: AutogenRequestBody, request: Request):
+    async def autogen(request: Request):
+        if serve_mode != "edit":
+            raise HTTPException(status_code=403, detail="Invalid mode.")
+        if not _check_origin_header(request.headers.get("origin")):
+            raise HTTPException(status_code=403, detail="Incorrect origin. Only local origins are allowed.")
+        content_type = request.headers.get("content-type", "")
+        if content_type.split(";")[0].strip().lower() != "application/json":
+            raise HTTPException(status_code=415, detail="Expected application/json.")
+        session_id = request.headers.get("x-session-id")
+        if not session_id or not await app_runner.check_session(session_id):
+            raise HTTPException(status_code=403, detail="Invalid session.")
+        try:
+            requestBody = AutogenRequestBody.model_validate_json(await request.body())
+        except ValidationError as e:
+            raise RequestValidationError(e.errors()) from e
+
         import writer.autogen
         agent_token_header = request.headers.get('x-agent-token')
 
-        return writer.autogen.generate_blueprint(
+        _reserve_autogen_slot(session_id)
+        # The slot is held until the worker thread finishes, even if the client disconnects.
+        worker = asyncio.ensure_future(asyncio.to_thread(
+            writer.autogen.generate_blueprint,
             requestBody.description,
             agent_token_header
-            )
+        ))
+        worker.add_done_callback(lambda w: _release_autogen_slot(session_id, w))
+        return await asyncio.shield(worker)
 
     @app.post("/api/data/retrieve")
     async def retrieve_data(requestBody: RetrieveDataRequestBody) -> RetrieveDataResponseBody:

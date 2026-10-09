@@ -1,6 +1,6 @@
 from typing import Any, Dict, List, Optional, Protocol, Tuple, Union
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing_extensions import Literal, TypedDict
 
 
@@ -76,8 +76,11 @@ class WriterApplicationInformation(BaseModel):
     isOrganizationAdmin: Optional[bool] = False
 
 
+AUTOGEN_MAX_DESCRIPTION_LENGTH = 8000
+
+
 class AutogenRequestBody(BaseModel):
-    description: str
+    description: str = Field(min_length=1, max_length=AUTOGEN_MAX_DESCRIPTION_LENGTH)
 
 
 class RetrieveDataRequestBody(BaseModel):

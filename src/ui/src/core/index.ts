@@ -1126,8 +1126,13 @@ export function generateCore() {
 		return null;
 	}
 
+	function getSessionId() {
+		return sessionId;
+	}
+
 	const core = {
 		webSocket,
+		getSessionId,
 		syncHealth,
 		frontendMessageMap: readonly(frontendMessageMap),
 		mode: readonly(mode),
