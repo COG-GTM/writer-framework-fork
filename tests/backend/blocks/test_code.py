@@ -97,3 +97,13 @@ def test_code_syntax_error_without_template_is_raised(session, runner, fake_user
     with pytest.raises(SyntaxError):
         block.run()
     assert block.outcome == "error"
+
+
+def test_code_unrelated_syntax_error_with_template_literal_is_raised(session, runner, fake_userapp):
+    component = session.add_fake_component(
+        {"code": "set_output('@{name}')  # @{name}\nif :\n    pass"}
+    )
+    block = CodeBlock(component, runner, {})
+    with pytest.raises(SyntaxError):
+        block.run()
+    assert block.outcome == "error"

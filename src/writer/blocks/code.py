@@ -1,11 +1,12 @@
+import io
 import logging
 import sys
+import tokenize
 import traceback
 from typing import Any
 
 from writer.abstract import register_abstract_template
 from writer.blocks.base_block import BlueprintBlock
-from writer.evaluator import Evaluator
 from writer.logs import use_logging_redirect, use_stdout_redirect
 from writer.ss_types import AbstractTemplate, WriterConfigurationError
 
@@ -70,6 +71,26 @@ class CodeBlock(BlueprintBlock):
     def set_output(self, output: Any):
         self.result = output
 
+    @staticmethod
+    def _get_template_lines(code: str) -> set:
+        # Lines with an @{ outside of strings and comments
+        lines = set()
+        prev = None
+        try:
+            for token in tokenize.generate_tokens(io.StringIO(code).readline):
+                if (
+                    prev is not None
+                    and prev.type == tokenize.OP
+                    and prev.string == "@"
+                    and token.string == "{"
+                    and prev.end == token.start
+                ):
+                    lines.add(token.start[0])
+                prev = token
+        except (tokenize.TokenError, SyntaxError):
+            pass
+        return lines
+
     def _get_code(self) -> str:
         # The code is executed as-is. Expanding @{...} templates here would
         # splice state, payloads and block results into the source and allow
@@ -78,7 +99,7 @@ class CodeBlock(BlueprintBlock):
         try:
             compile(code, f"<code block {self.component.id}>", "exec")
         except SyntaxError as e:
-            if Evaluator.TEMPLATE_REGEX.search(code):
+            if e.lineno in self._get_template_lines(code):
                 raise WriterConfigurationError(
                     "Template expressions (@{...}) are not supported in Python code blocks. "
                     "Read values from `state`, `payload`, `result` or `results` instead, "
