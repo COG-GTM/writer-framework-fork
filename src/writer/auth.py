@@ -1,5 +1,6 @@
 import asyncio
 import dataclasses
+import hmac
 import logging
 import os.path
 import time
@@ -90,7 +91,7 @@ class BasicAuth(Auth):
     delay_after_failure: int = 1  # limit attempt when authentication fail (reduce brute force risk)
     block_user_after_failure: bool = True  # delay the answer to the user after a failed login
 
-    callback_func: Optional[Callable[[Request, str, dict], None]] = None  # Callback to validate user authentication
+    callback_func: Optional[Callable[[Request, str, dict], None]] = None  # Extra authorization step, called only after login/password are verified; raise Unauthorized to reject
     unauthorized_action: Optional[Callable[[Request, Unauthorized], Response]] = None  # Callback to build its own page when a user is not allowed
 
 
@@ -121,12 +122,18 @@ class BasicAuth(Auth):
                 if scheme != 'Basic':
                     return HTMLResponse("", status.HTTP_401_UNAUTHORIZED, {"WWW-Authenticate": "Basic"})
 
-                username, password = base64.b64decode(data).decode().split(':', 1)
+                try:
+                    username, password = base64.b64decode(data, validate=True).decode().split(':', 1)
+                except (ValueError, UnicodeDecodeError):
+                    raise Unauthorized()
+
+                login_ok = hmac.compare_digest(username.encode(), self.login.encode())
+                password_ok = hmac.compare_digest(password.encode(), self.password.encode())
+                if not (login_ok and password_ok):
+                    raise Unauthorized()
+
                 if self.callback_func:
                     self.callback_func(request, session_id, {'username': username})
-                else:
-                    if username != self.login or password != self.password:
-                        raise Unauthorized()
 
                 return await call_next(request)
             except Unauthorized as exc:

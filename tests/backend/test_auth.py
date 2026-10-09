@@ -38,6 +38,52 @@ class TestAuth:
             res = client.get("/api/init")
             assert res.status_code == 405
 
+    @staticmethod
+    def _basicauth_app_with_callback(callback):
+        app = fastapi.FastAPI()
+
+        @app.get("/protected")
+        def protected():
+            return {"ok": True}
+
+        _auth = auth.BasicAuth(login="admin", password="admin", delay_after_failure=0, block_user_after_failure=False)
+        _auth.register(app, callback=callback)  # type: ignore[arg-type]
+        return app
+
+    def test_basicauth_with_callback_should_reject_wrong_password(self):
+        """
+        This test verifies that registering a callback does not disable the password check.
+        """
+        calls = []
+        app = self._basicauth_app_with_callback(lambda request, session_id, data: calls.append(data))
+        with fastapi.testclient.TestClient(app) as client:
+            res = client.get("/protected", auth=("admin", "anything"))
+            assert res.status_code == 401
+            assert calls == []
+
+    def test_basicauth_with_callback_should_accept_valid_credentials(self):
+        calls = []
+        app = self._basicauth_app_with_callback(lambda request, session_id, data: calls.append(data))
+        with fastapi.testclient.TestClient(app) as client:
+            res = client.get("/protected", auth=("admin", "admin"))
+            assert res.status_code == 200
+            assert calls == [{"username": "admin"}]
+
+    def test_basicauth_with_callback_can_reject_valid_credentials(self):
+        def callback(request, session_id, data):
+            raise auth.Unauthorized()
+
+        app = self._basicauth_app_with_callback(callback)
+        with fastapi.testclient.TestClient(app) as client:
+            res = client.get("/protected", auth=("admin", "admin"))
+            assert res.status_code == 401
+
+    def test_basicauth_should_reject_malformed_authorization_header(self):
+        app = self._basicauth_app_with_callback(None)
+        with fastapi.testclient.TestClient(app) as client:
+            res = client.get("/protected", headers={"Authorization": "Basic bm9jb2xvbg=="})
+            assert res.status_code == 401
+
     @pytest.mark.parametrize("path,expected_path", [
         ("", "/"),
         ("http://localhost", "/"),
