@@ -1,5 +1,6 @@
 import asyncio
 import dataclasses
+import json
 import logging
 import os.path
 import time
@@ -241,6 +242,8 @@ class Oidc(Auth):
                     response.delete_cookie("session")
                 return response
 
+        asgi_app.add_middleware(_StreamSessionGuard, is_session_allowed=self.is_session_issued)
+
         @asgi_app.get('/' + urlstrip(self.callback_authorize))
         async def route_callback(request: Request):
             self.authlib.fetch_token(url=self.url_oauthtoken, authorization_response=str(request.url))
@@ -303,6 +306,55 @@ class Oidc(Auth):
         for expired_session_id in [sid for sid, expires_at in self.issued_sessions.items() if expires_at <= now]:
             del self.issued_sessions[expired_session_id]
         self.issued_sessions[session_id] = now + self.session_max_age_seconds
+
+
+class _StreamSessionGuard:
+    """
+    ASGI middleware that closes `/api/stream` websockets whose session is not allowed, both at
+    `streamInit` and on every later message, so an expired login cannot keep using the stream.
+    """
+
+    def __init__(self, app, is_session_allowed: Callable[[Optional[str]], bool]):
+        self.app = app
+        self.is_session_allowed = is_session_allowed
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "websocket" or not scope["path"].endswith("/api/stream"):
+            await self.app(scope, receive, send)
+            return
+
+        session_id: Optional[str] = None
+
+        async def guarded_receive():
+            nonlocal session_id
+            message = await receive()
+            if message["type"] != "websocket.receive":
+                return message
+            if session_id is None:
+                session_id = _stream_init_session_id(message)
+                if session_id is None:
+                    return message
+            if not self.is_session_allowed(session_id):
+                await send({"type": "websocket.close", "code": 1008})
+                return {"type": "websocket.disconnect", "code": 1008}
+            return message
+
+        await self.app(scope, guarded_receive, send)
+
+
+def _stream_init_session_id(message: dict) -> Optional[str]:
+    raw = message.get("text") or message.get("bytes")
+    if raw is None:
+        return None
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(data, dict) or data.get("type") != "streamInit":
+        return None
+    payload = data.get("payload")
+    session_id = payload.get("sessionId") if isinstance(payload, dict) else None
+    return session_id if isinstance(session_id, str) else ""
 
 
 def Google(client_id: str, client_secret: str, host_url: str, app_static_public = False) -> Oidc:

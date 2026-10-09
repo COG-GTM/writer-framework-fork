@@ -109,6 +109,15 @@ def _oidc_app(callback=None):
     async def init():
         return {"ok": True}
 
+    @asgi_app.websocket("/api/stream")
+    async def stream(websocket: fastapi.WebSocket):
+        await websocket.accept()
+        try:
+            while True:
+                await websocket.send_json({"echo": await websocket.receive_json()})
+        except fastapi.WebSocketDisconnect:
+            return
+
     oidc.register(asgi_app, callback=callback)
     oidc.authlib.fetch_token = lambda **kwargs: {"access_token": "token"}
     oidc.authlib.get = lambda url: _FakeUserinfoResponse()
@@ -178,3 +187,33 @@ class TestOidcAuth:
             res = client.post("/api/init", follow_redirects=False)
             assert res.status_code == 307
             assert session_id not in oidc.issued_sessions
+
+    def _issued_session(self, client) -> str:
+        res = client.get("/authorize?code=abc&state=xyz", follow_redirects=False)
+        return res.cookies["session"]
+
+    @pytest.mark.parametrize("payload", [{"sessionId": "c" * 64}, {}, None])
+    def test_oidc_stream_should_close_when_session_was_not_issued(self, payload):
+        asgi_app, _ = _oidc_app()
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            with client.websocket_connect("/api/stream") as ws:
+                ws.send_json({"type": "streamInit", "trackingId": 0, "payload": payload})
+                with pytest.raises(fastapi.WebSocketDisconnect) as exc:
+                    ws.receive_json()
+                assert exc.value.code == 1008
+
+    def test_oidc_stream_should_accept_issued_session_and_close_once_it_expires(self):
+        asgi_app, oidc = _oidc_app()
+        with fastapi.testclient.TestClient(asgi_app, base_url="https://app.example.com") as client:
+            session_id = self._issued_session(client)
+            with client.websocket_connect("/api/stream") as ws:
+                ws.send_json({"type": "streamInit", "trackingId": 0, "payload": {"sessionId": session_id}})
+                assert ws.receive_json()["echo"]["type"] == "streamInit"
+                ws.send_json({"type": "keepAlive", "trackingId": 1, "payload": None})
+                assert ws.receive_json()["echo"]["type"] == "keepAlive"
+
+                oidc.issued_sessions[session_id] = 0
+                ws.send_json({"type": "event", "trackingId": 2, "payload": {}})
+                with pytest.raises(fastapi.WebSocketDisconnect) as exc:
+                    ws.receive_json()
+                assert exc.value.code == 1008
