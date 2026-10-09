@@ -13,7 +13,7 @@ Afterwards, you can reference the video using the syntax \`@{vid_f}\`.
 <template>
 	<div class="CoreVideoPlayer">
 		<video
-			:src="fields.src.value"
+			:src="safeSrc || undefined"
 			:controls="fields.controls.value"
 			:autoplay="fields.autoplay.value"
 			:loop="fields.loop.value"
@@ -69,10 +69,15 @@ export default {
 </script>
 
 <script setup lang="ts">
-import { inject } from "vue";
+import { computed, inject } from "vue";
 import injectionKeys from "@/injectionKeys";
+import { MEDIA_URL_PROTOCOLS, sanitizeURL } from "@/utils/url";
 
 const fields = inject(injectionKeys.evaluatedFields);
+
+const safeSrc = computed(() =>
+	sanitizeURL(fields.src.value, MEDIA_URL_PROTOCOLS),
+);
 </script>
 
 <style scoped>

@@ -1,7 +1,7 @@
 <template>
 	<div class="CoreLink">
 		<a
-			:href="fields.url.value"
+			:href="safeUrl || undefined"
 			:target="fields.target.value"
 			:rel="fields.rel.value"
 		>
@@ -67,7 +67,12 @@ export default {
 
 <script setup lang="ts">
 import { inject, computed } from "vue";
+import { LINK_URL_PROTOCOLS, sanitizeURL } from "@/utils/url";
 const fields = inject(injectionKeys.evaluatedFields);
+
+const safeUrl = computed(() =>
+	sanitizeURL(fields.url.value, LINK_URL_PROTOCOLS),
+);
 
 const displayText = computed(() => {
 	return fields.text.value || fields.url.value;
