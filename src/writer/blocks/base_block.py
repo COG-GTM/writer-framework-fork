@@ -1,10 +1,11 @@
-from typing import TYPE_CHECKING, Any, Dict, Optional, Type
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type
 
 import httpx
 from writerai import DefaultHttpxClient, Writer
 
 import writer.core_ui
 import writer.evaluator
+from writer.blocks.redaction import collect_secret_values, redact_headers, redact_text
 from writer.ss_types import WriterConfigurationError
 
 if TYPE_CHECKING:
@@ -86,6 +87,15 @@ class BlueprintBlock:
             self._handle_missing_field(field_key)
 
         return value
+
+    def _get_secret_values(self) -> List[str]:
+        """
+        Resolved secrets (vault values and environment variables referenced by
+        this block's fields) that must not be echoed into results or logs.
+        """
+        return collect_secret_values(
+            self.execution_environment.get("vault"), self.component.content.values()
+        )
 
     def _set_state(self, expr: str, value: Any):
         self.evaluator.set_state(
@@ -229,6 +239,7 @@ class BlueprintBlock:
     ):
         import uuid
         instance_path = self.instance_path[0].get('componentId', None)
+        block = self
 
         class ExecutionEnvironmentLogger:
             """
@@ -292,15 +303,16 @@ class BlueprintBlock:
                 else:
                     content = None
 
+                secrets = block._get_secret_values()
                 log_entry = {
                     'id': request_id,
                     'created_at': dt.datetime.now(dt.timezone.utc).isoformat(),
                     'created_by': current_block_id,
                     'request': {
                         'method': request.method,
-                        'url': str(request.url),
-                        'headers': dict(request.headers),
-                        'content': content
+                        'url': redact_text(str(request.url), secrets),
+                        'headers': redact_headers(request.headers, secrets),
+                        'content': redact_text(content, secrets)
                     },
                     'response': None  # Will populate later
                 }
@@ -316,10 +328,11 @@ class BlueprintBlock:
                     # Unlikely scenario
                     return
 
+                secrets = block._get_secret_values()
                 log_entry['response'] = {
                     'status_code': response.status_code,
-                    'url': str(response.url),
-                    'headers': dict(response.headers),
+                    'url': redact_text(str(response.url), secrets),
+                    'headers': redact_headers(response.headers, secrets),
                     'content': None  # Initially empty
                 }
                 response.extensions['log_entry'] = log_entry
