@@ -30,6 +30,7 @@ MessageType = Literal[
     "codeUpdate",
     "codeSave",
     "checkSession",
+    "closeSession",
     "keepAlive",
     "stateEnquiry",
     "setUserinfo",

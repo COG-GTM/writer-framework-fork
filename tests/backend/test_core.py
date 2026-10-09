@@ -1,5 +1,6 @@
 import json
 import math
+import time
 import typing
 import unittest
 import urllib
@@ -1127,6 +1128,67 @@ class TestSessionManager:
         s.last_active_timestamp -= SessionManager.IDLE_SESSION_MAX_SECONDS + EXCESS_IDLE_SECONDS
         self.sm.prune_sessions()
         assert self.sm.get_session(s.session_id) is None
+
+    def test_unengaged_session_timeout(self) -> None:
+        sm = SessionManager()
+        unengaged = sm.get_new_session(None, None, None)
+        engaged = sm.get_new_session(None, None, None)
+        engaged.mark_engaged()
+        stale = int(time.time()) - SessionManager.UNENGAGED_SESSION_MAX_SECONDS - 1
+        unengaged.last_active_timestamp = stale
+        engaged.last_active_timestamp = stale
+        sm.prune_sessions()
+        assert sm.get_session(unengaged.session_id) is None
+        assert sm.get_session(engaged.session_id) is engaged
+
+    def test_max_sessions_evicts_oldest_unengaged(self) -> None:
+        sm = SessionManager()
+        sm.MAX_SESSIONS = 3
+        engaged = sm.get_new_session(None, None, None)
+        engaged.mark_engaged()
+        oldest = sm.get_new_session(None, None, None)
+        oldest.last_active_timestamp -= 10
+        newer = sm.get_new_session(None, None, None)
+        latest = sm.get_new_session(None, None, None)
+        assert latest is not None
+        assert len(sm.sessions) == 3
+        assert sm.get_session(oldest.session_id) is None
+        assert sm.get_session(engaged.session_id) is engaged
+        assert sm.get_session(newer.session_id) is newer
+
+    def test_max_sessions_rejects_when_all_engaged(self) -> None:
+        sm = SessionManager()
+        sm.MAX_SESSIONS = 2
+        for _ in range(2):
+            sm.get_new_session(None, None, None).mark_engaged()
+        assert sm.get_new_session(None, None, None) is None
+        assert len(sm.sessions) == 2
+
+    def test_max_sessions_allows_existing_proposed_id(self) -> None:
+        sm = SessionManager()
+        sm.MAX_SESSIONS = 1
+        s = sm.get_new_session(None, None, self.proposed_session_id)
+        s.mark_engaged()
+        assert sm.get_new_session(None, None, self.proposed_session_id) is not None
+        assert len(sm.sessions) == 1
+
+    def test_max_sessions_concurrent_creation(self) -> None:
+        import threading
+
+        sm = SessionManager()
+        sm.MAX_SESSIONS = 3
+        barrier = threading.Barrier(12)
+
+        def create():
+            barrier.wait()
+            sm.get_new_session(None, None, None)
+
+        threads = [threading.Thread(target=create) for _ in range(12)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert len(sm.sessions) == 3
 
     def test_session_verifiers(self) -> None:
         def session_verifier_1(cookies: Dict[str, str]):
