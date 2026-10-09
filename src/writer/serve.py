@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import hmac
 import html
 import importlib.util
 import io
@@ -34,7 +35,7 @@ from urllib.parse import urlsplit
 
 import orjson
 import uvicorn
-from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.routing import Mount
 from fastapi.staticfiles import StaticFiles
@@ -73,6 +74,9 @@ if typing.TYPE_CHECKING:
 MAX_WEBSOCKET_MESSAGE_SIZE = 201 * 1024 * 1024
 BLUEPRINT_API_EXECUTION_TIMEOUT_SECONDS = int(os.getenv("AGENT_BUILDER_BLUEPRINT_API_EXECUTION_TIMEOUT", "600"))
 BLUEPRINT_API_RETRY_TIMEOUT = int(os.getenv("AGENT_BUILDER_BLUEPRINT_API_RETRY_TIMEOUT", "10000"))
+PRIVATE_API_TOKEN_ENV = "WRITER_PRIVATE_API_TOKEN"
+BLUEPRINT_TRIGGER_TYPES = ("blueprints_apitrigger", "blueprints_crontrigger")
+LOOPBACK_HOSTS = ("127.0.0.1", "::1")
 
 
 class WriterState(typing.Protocol):
@@ -385,28 +389,68 @@ def get_asgi_app(
 
     # Jobs
 
-    async def _get_payload_as_json(request: Request):
-        payload = None
+    def _require_private_api_auth(request: Request) -> None:
+        """
+        Guards /private/api/*. When WRITER_PRIVATE_API_TOKEN is set, a matching
+        `Authorization: Bearer <token>` header is required. Otherwise only
+        non-browser requests from the loopback interface are accepted.
+        """
+        expected_token = os.getenv(PRIVATE_API_TOKEN_ENV)
+        if expected_token:
+            scheme, _, provided_token = request.headers.get("authorization", "").partition(" ")
+            if scheme.lower() != "bearer" or not hmac.compare_digest(
+                provided_token.strip().encode(), expected_token.encode()
+            ):
+                raise HTTPException(
+                    status_code=401,
+                    detail="Invalid or missing private API token.",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+            return
+
+        client_host = request.client.host if request.client else None
+        if client_host not in LOOPBACK_HOSTS or request.headers.get("origin") is not None:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Private API is disabled. Set {PRIVATE_API_TOKEN_ENV} to enable it.",
+            )
+
+    async def _get_payload_as_json(request: Request) -> Optional[Dict[str, Any]]:
         body = await request.body()
         if not body:
             return None
+        content_type = request.headers.get("content-type", "")
+        if content_type.split(";")[0].strip().lower() != "application/json":
+            raise HTTPException(status_code=415, detail="Content-Type must be application/json.")
         try:
             payload = await request.json()
         except json.JSONDecodeError:
             raise HTTPException(status_code=400, detail="Cannot parse the payload.")
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="The payload must be a JSON object.")
         return payload
-    
+
     def is_blueprint_triggerable(app_runner: AppRunner, blueprint_id: str) -> bool:
         """Check if blueprint has at least one supported trigger (API or Cron)."""
         if not app_runner.bmc_components:
             return False
-        supported_triggers = ("blueprints_apitrigger", "blueprints_crontrigger")
         return any(
-            comp["type"] in supported_triggers and comp.get("parentId") == blueprint_id
+            comp["type"] in BLUEPRINT_TRIGGER_TYPES and comp.get("parentId") == blueprint_id
             for comp in app_runner.bmc_components.values()
         )
 
-    @app.get("/private/api/blueprints")
+    def is_blueprint_trigger(app_runner: AppRunner, blueprint_id: str, trigger_id: str) -> bool:
+        """Check if trigger_id is an API or Cron trigger that belongs to blueprint_id."""
+        if not app_runner.bmc_components:
+            return False
+        comp = app_runner.bmc_components.get(trigger_id)
+        return (
+            comp is not None
+            and comp.get("type") in BLUEPRINT_TRIGGER_TYPES
+            and comp.get("parentId") == blueprint_id
+        )
+
+    @app.get("/private/api/blueprints", dependencies=[Depends(_require_private_api_auth)])
     async def get_blueprints(request: Request):
         """
         Returns a list of blueprints available in the agent.
@@ -426,7 +470,7 @@ def get_asgi_app(
 
         return JSONResponse(content=blueprints)
 
-    @app.get("/private/api/cron-triggers")
+    @app.get("/private/api/cron-triggers", dependencies=[Depends(_require_private_api_auth)])
     async def get_cron_triggers(request: Request):
         """
         Returns a list of Cron Trigger blocks.
@@ -450,11 +494,23 @@ def get_asgi_app(
 
         return JSONResponse(content=cron_triggers, status_code=200)
 
-    @app.post("/private/api/blueprint/{blueprint_id}")
+    @app.post("/private/api/blueprint/{blueprint_id}", dependencies=[Depends(_require_private_api_auth)])
     async def create_blueprint_job(blueprint_id: str, request: Request, response: Response, branch_id: Optional[str] = None):
         # Keep-alive interval for SSE streaming
         KEEPALIVE_INTERVAL = 15
-        payload = await _get_payload_as_json(request)
+        payload = await _get_payload_as_json(request) or {}
+
+        body_blueprint_id = payload.pop("blueprint_id", None)
+        if body_blueprint_id is not None and body_blueprint_id != blueprint_id:
+            raise HTTPException(status_code=400, detail="blueprint_id in the body does not match the path.")
+        body_branch_id = payload.pop("branch_id", None)
+        if body_branch_id is not None and not isinstance(body_branch_id, str):
+            raise HTTPException(status_code=400, detail="branch_id must be a string.")
+        if body_branch_id is not None:
+            if branch_id is not None and body_branch_id != branch_id:
+                raise HTTPException(status_code=400, detail="branch_id in the body does not match the query string.")
+            branch_id = body_branch_id
+        branch_id = branch_id or None
 
         # --- Session initialization ---
 
@@ -477,10 +533,10 @@ def get_asgi_app(
         # --- Blueprint discovery logic ---
 
         def check_blueprint(app_runner: AppRunner, blueprint_id: str) -> bool:
-            # Locate blueprint component by its key
             if not app_runner.bmc_components:
                 return False
-            return blueprint_id in app_runner.bmc_components
+            comp = app_runner.bmc_components.get(blueprint_id)
+            return comp is not None and comp.get("type") == "blueprints_blueprint"
 
         # --- Result serialization (recursive) ---
 
@@ -532,21 +588,19 @@ def get_asgi_app(
                     }))
                     return
 
-                if not branch_id and not is_blueprint_triggerable(app_runner, blueprint_id):
+                if not is_blueprint_triggerable(app_runner, blueprint_id):
                     await queue.put(await format_event("error", {
                         "msg": f"Blueprint '{blueprint_id}' lacks a supported trigger (API or Cron).",
                         "finished_at": int(time.time())
                     }))
                     return
 
-                if branch_id:
-                    block = app_runner.bmc_components.get(branch_id)
-                    if not block:
-                        await queue.put(await format_event("error", {
-                            "msg": f"Block '{branch_id}' was not found.",
-                            "finished_at": int(time.time())
-                        }))
-                        return
+                if branch_id and not is_blueprint_trigger(app_runner, blueprint_id, branch_id):
+                    await queue.put(await format_event("error", {
+                        "msg": f"Block '{branch_id}' was not found or is not an API or Cron trigger of blueprint '{blueprint_id}'.",
+                        "finished_at": int(time.time())
+                    }))
+                    return
 
                 await queue.put(await format_event("status", {"status": "executing", "msg": (f"Executing branch: {branch_id}..." if branch_id else f"Executing blueprint: {blueprint_id}...")}))
 
@@ -558,9 +612,9 @@ def get_asgi_app(
                             isSafe=True,
                             handler="run_blueprint_via_api",
                             payload={
+                                **payload,
                                 "blueprint_id": blueprint_id,
                                 "branch_id": branch_id,
-                                **(payload or {})
                             },
                         )
                     )
@@ -642,8 +696,6 @@ def get_asgi_app(
             headers={
                 "Cache-Control": "no-cache",
                 "Connection": "keep-alive",
-                "Access-Control-Allow-Origin": "*",
-                "Access-Control-Allow-Headers": "Cache-Control",
             },
         )
 

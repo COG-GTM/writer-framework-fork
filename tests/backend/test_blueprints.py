@@ -6,7 +6,14 @@ from unittest.mock import MagicMock
 
 import pytest
 from writer.blocks.base_block import BlueprintBlock, BlueprintBlock_T
-from writer.blueprints import MAX_DAG_DEPTH, BlueprintRunManager, Graph, GraphBuilder, GraphRunner
+from writer.blueprints import (
+    MAX_DAG_DEPTH,
+    BlueprintRunManager,
+    BlueprintRunner,
+    Graph,
+    GraphBuilder,
+    GraphRunner,
+)
 from writer.core_ui import Component
 
 
@@ -515,6 +522,38 @@ class TestBranchExecution:
         assert node.inputs == []
         dummy_node = graph.get_node("dummy")
         assert dummy_node is None
+
+
+class TestRunBlueprintViaApi:
+    components = {
+        "bp1": Component(id="bp1", type="blueprints_blueprint", parentId="blueprints_root"),
+        "bp2": Component(id="bp2", type="blueprints_blueprint", parentId="blueprints_root"),
+        "api1": Component(id="api1", type="blueprints_apitrigger", parentId="bp1"),
+        "cron1": Component(id="cron1", type="blueprints_crontrigger", parentId="bp1"),
+        "code1": Component(id="code1", type="blueprints_code", parentId="bp1"),
+        "api2": Component(id="api2", type="blueprints_apitrigger", parentId="bp2"),
+    }
+
+    def _runner(self):
+        session = MagicMock()
+        session.session_component_tree.get_component.side_effect = self.components.get
+        runner = BlueprintRunner(session)
+        runner.run_branch = MagicMock(return_value="ok")
+        return runner
+
+    @pytest.mark.parametrize("branch_id,trigger_type", [("api1", "API"), ("cron1", "Cron")])
+    def test_runs_trigger_of_blueprint(self, branch_id, trigger_type):
+        runner = self._runner()
+        assert runner.run_blueprint_via_api("bp1", branch_id) == "ok"
+        title = runner.run_branch.call_args.args[3]
+        assert title == f"{trigger_type} trigger execution (bp1 -> {branch_id})"
+
+    @pytest.mark.parametrize("branch_id", ["code1", "api2", "missing"])
+    def test_rejects_non_trigger_or_foreign_branch(self, branch_id):
+        runner = self._runner()
+        with pytest.raises(ValueError):
+            runner.run_blueprint_via_api("bp1", branch_id)
+        runner.run_branch.assert_not_called()
 
 
 # class TestCancellation:
