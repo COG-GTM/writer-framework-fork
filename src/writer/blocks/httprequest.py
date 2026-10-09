@@ -1,8 +1,16 @@
 import json
+import logging
+
+import httpx
 
 from writer.abstract import register_abstract_template
+from writer.blocks import egress
 from writer.blocks.base_block import BlueprintBlock
 from writer.ss_types import AbstractTemplate
+
+logger = logging.getLogger("writer")
+
+MAX_LOGGED_ERROR_BODY = 2000
 
 
 class HTTPRequest(BlueprintBlock):
@@ -37,6 +45,7 @@ class HTTPRequest(BlueprintBlock):
                             "name": "URL",
                             "type": "Text",
                             "control": "Textarea",
+                            "description": "Values inserted with @{...} after the start of the URL are URL-encoded. Only public http(s) destinations are allowed by default.",
                         },
                         "headers": {
                             "name": "Headers",
@@ -85,10 +94,20 @@ class HTTPRequest(BlueprintBlock):
             ),
         )
 
+    def acquire_httpx_client(self) -> httpx.Client:
+        if self._custom_httpx_client:
+            return self._custom_httpx_client
+        client = self.create_httpx_client(transport=egress.GuardedHTTPTransport())
+        hooks = client.event_hooks
+        hooks["request"] = [egress.request_hook] + hooks.get("request", [])
+        client.event_hooks = hooks
+        return client
+
     def run(self):
         try:
             method = self._get_field("method", False, "GET")
-            url = self._get_field("url")
+            url = self._get_field("url", url_encode=True)
+            egress.check_url(url)
             headers = self._get_field("headers", True, default_field_value="{}")
             body_type = self._get_field("bodyType")
             body = None
@@ -123,9 +142,13 @@ class HTTPRequest(BlueprintBlock):
                     self.outcome = "success"
                 else:
                     self.outcome = "responseError"
-                    raise RuntimeError(
-                        f"HTTP response with code {res.status_code} and message {res.text}"
+                    logger.warning(
+                        "HTTP request block %s received status %s: %s",
+                        self.component.id,
+                        res.status_code,
+                        res.text[:MAX_LOGGED_ERROR_BODY],
                     )
+                    raise RuntimeError(f"HTTP response with code {res.status_code}.")
 
         except json.JSONDecodeError as e:
             self.outcome = "responseError"
