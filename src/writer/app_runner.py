@@ -1007,13 +1007,22 @@ class AppRunner:
             else:
                 raise error
 
+    @staticmethod
+    def _is_within(path: str, directory: str) -> bool:
+        path = os.path.normcase(path)
+        directory = os.path.normcase(directory)
+        try:
+            return os.path.commonpath([path, directory]) == directory
+        except ValueError:
+            return False
+
     def _check_file_in_app_path(self, path):
-        app_path = os.path.abspath(self.app_path)
-        file_path = os.path.abspath(path)
-        if file_path == app_path or not file_path.startswith(app_path):
+        app_path = os.path.realpath(self.app_path)
+        file_path = os.path.realpath(path)
+        if file_path == app_path or not self._is_within(file_path, app_path):
             raise PermissionError(f"{path} should be inside of application ({self.app_path})")
-        wf_path = os.path.abspath(os.path.join(self.app_path, ".wf"))
-        if file_path.startswith(wf_path):
+        wf_path = os.path.join(app_path, ".wf")
+        if self._is_within(file_path, wf_path):
             raise PermissionError(f"{path} should not be inside of Writer Framework files ({wf_path})")
 
     def _load_persisted_components(self) -> Dict[str, ComponentDefinition]:
@@ -1115,10 +1124,7 @@ class AppRunner:
             raise PermissionError("Cannot save code in non-edit mode.")
 
         filepath = os.path.join(self.app_path, *path)
-
-        # ensure we don't load a file outside of the application (like `../../../etc/passwd`)
-        if not os.path.abspath(filepath).startswith(self.app_path):
-            raise FileNotFoundError(f"{filepath} is outside of application ({self.app_path})")
+        self._check_file_in_app_path(filepath)
 
         with open(filepath, "w") as f:
             f.write(code)
