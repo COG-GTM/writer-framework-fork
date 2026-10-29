@@ -143,3 +143,23 @@ def test_vault_cache_evicts_least_recently_used_tenant(kv_env, monkeypatch):
     assert len(seen) == 3
     assert use("b") == {"tenant": "b"}
     assert len(seen) == 4
+
+
+def test_spoofed_init_headers_do_not_change_storage_tenant(kv_env):
+    session = writer.core.session_manager.get_new_session(
+        cookies={}, headers={**SPOOFED_HEADERS, "user-agent": "test"}
+    )
+    assert session is not None
+    storage, seen = _recording_storage()
+    try:
+        with writer.core.use_request_context(session.session_id, SimpleNamespace(type="event")):
+            assert writer.core.get_session() is session
+            storage.save("wf-journal-test", {"ok": True})
+            storage.get("some-key", "data")
+
+            storage.delete("some-key")
+    finally:
+        writer.core.session_manager.close_session(session.session_id)
+
+    assert [r.headers["X-Agent-Id"] for r in seen] == [ENV_AGENT] * 3
+    assert [r.headers["X-Organization-Id"] for r in seen] == [ENV_ORG] * 3
