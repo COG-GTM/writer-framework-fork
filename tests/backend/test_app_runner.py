@@ -345,3 +345,93 @@ class TestAppRunner:
 
             # Then
             assert res.payload.result["result"] is not None
+
+
+class TestAppRunnerFileContainment:
+    @pytest.fixture
+    def app_layout(self, tmp_path):
+        app = tmp_path / "app"
+        sibling = tmp_path / "app2"
+        (app / ".wf").mkdir(parents=True)
+        sibling.mkdir()
+        (app / "main.py").write_text("print('main')")
+        (sibling / "main.py").write_text("print('sibling')")
+        return app, sibling
+
+    @pytest.mark.usefixtures("setup_app_runner")
+    def test_check_file_rejects_sibling_with_common_prefix(self, setup_app_runner, app_layout) -> None:
+        app, sibling = app_layout
+        with setup_app_runner(str(app), "edit") as ar:
+            with pytest.raises(PermissionError):
+                ar._check_file_in_app_path(str(app / ".." / "app2" / "f"))
+            with pytest.raises(PermissionError):
+                ar._check_file_in_app_path(str(sibling / "main.py"))
+            with pytest.raises(PermissionError):
+                ar._check_file_in_app_path(str(app))
+
+    @pytest.mark.usefixtures("setup_app_runner")
+    def test_check_file_wf_exclusion_is_directory_scoped(self, setup_app_runner, app_layout) -> None:
+        app, _ = app_layout
+        with setup_app_runner(str(app), "edit") as ar:
+            with pytest.raises(PermissionError):
+                ar._check_file_in_app_path(str(app / ".wf"))
+            with pytest.raises(PermissionError):
+                ar._check_file_in_app_path(str(app / ".wf" / "metadata.json"))
+            ar._check_file_in_app_path(str(app / ".wfoo"))
+            ar._check_file_in_app_path(str(app / "sub" / "main.py"))
+
+    @pytest.mark.usefixtures("setup_app_runner")
+    def test_check_file_rejects_symlink_escape(self, setup_app_runner, app_layout) -> None:
+        app, sibling = app_layout
+        (app / "link").symlink_to(sibling, target_is_directory=True)
+        with setup_app_runner(str(app), "edit") as ar:
+            with pytest.raises(PermissionError):
+                ar._check_file_in_app_path(str(app / "link" / "main.py"))
+
+    @pytest.mark.usefixtures("setup_app_runner")
+    def test_check_file_rejects_symlinked_wf_directory(self, setup_app_runner, tmp_path) -> None:
+        app = tmp_path / "app"
+        (app / "wfdata").mkdir(parents=True)
+        (app / "wfdata" / "metadata.json").write_text("{}")
+        (app / ".wf").symlink_to(app / "wfdata", target_is_directory=True)
+        (app / "wflink").symlink_to(app / ".wf", target_is_directory=True)
+        with setup_app_runner(str(app), "edit") as ar:
+            with pytest.raises(PermissionError):
+                ar._check_file_in_app_path(str(app / ".wf" / "metadata.json"))
+            with pytest.raises(PermissionError):
+                ar._check_file_in_app_path(str(app / "wfdata" / "metadata.json"))
+            with pytest.raises(PermissionError):
+                ar._check_file_in_app_path(str(app / "wflink" / "metadata.json"))
+
+    @pytest.mark.usefixtures("setup_app_runner")
+    def test_file_operations_reject_sibling_directory(self, setup_app_runner, app_layout) -> None:
+        app, sibling = app_layout
+        with setup_app_runner(str(app), "edit") as ar:
+            with pytest.raises(PermissionError):
+                ar.load_persisted_script("../app2/main.py")
+            with pytest.raises(PermissionError):
+                ar.create_persisted_script("../app2/new.py", "x")
+            with pytest.raises(PermissionError):
+                ar.rename_persisted_script("../app2/main.py", "moved.py")
+            with pytest.raises(PermissionError):
+                ar.delete_persisted_script("../app2/main.py")
+            with pytest.raises(PermissionError):
+                ar.save_code(None, "print('pwned')", ["..", "app2", "main.py"])
+            with pytest.raises(PermissionError):
+                ar.save_code(None, "{}", [".wf", "metadata.json"])
+        assert (sibling / "main.py").read_text() == "print('sibling')"
+        assert not (sibling / "new.py").exists()
+        assert not (app / "moved.py").exists()
+
+    @pytest.mark.usefixtures("setup_app_runner")
+    def test_file_operations_inside_app_still_work(self, setup_app_runner, app_layout) -> None:
+        app, _ = app_layout
+        with setup_app_runner(str(app), "edit") as ar:
+            ar.save_code(None, "print('saved')", ["main.py"])
+            assert (app / "main.py").read_text() == "print('saved')"
+            ar.create_persisted_script("helper.py", "x = 1")
+            assert ar.load_persisted_script("helper.py") == "x = 1"
+            ar.rename_persisted_script("helper.py", "lib/helper.py")
+            assert (app / "lib" / "helper.py").exists()
+            ar.delete_persisted_script("lib/helper.py")
+            assert not (app / "lib" / "helper.py").exists()
