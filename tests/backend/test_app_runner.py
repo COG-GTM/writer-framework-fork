@@ -385,3 +385,28 @@ class TestAppRunnerComponentIdValidation:
             with pytest.raises(ValueError):
                 asyncio.run(ar.import_zip(str(archive)))
         assert sorted(os.listdir(app_dir / ".wf")) == page_files
+
+    def test_import_zip_supersedes_pending_save(self, setup_app_runner, tmp_path, monkeypatch) -> None:
+        source_dir = tmp_path / "source"
+        shutil.copytree(test_app_dir, source_dir)
+        archive = tmp_path / "valid.zip"
+        with zipfile.ZipFile(archive, "w") as zf:
+            for root, _, files in os.walk(source_dir):
+                for name in files:
+                    path = os.path.join(root, name)
+                    zf.write(path, os.path.relpath(path, source_dir))
+        app_dir = tmp_path / "app"
+        shutil.copytree(test_app_dir, app_dir)
+        queued = []
+        monkeypatch.setattr(
+            wf_project,
+            "write_files_async",
+            lambda context, metadata, components: queued.append((metadata, components)),
+        )
+        with setup_app_runner(str(app_dir), "edit") as ar:
+            monkeypatch.setattr(ar, "_start_fs_observer", lambda: None)
+            monkeypatch.setattr(ar, "reload_code_from_saved", lambda: None)
+            asyncio.run(ar.import_zip(str(archive)))
+            assert len(queued) == 1
+            assert queued[0][1] is ar.bmc_components
+            assert queued[0][0] == wf_project.read_files(str(source_dir))[0]
