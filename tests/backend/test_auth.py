@@ -137,6 +137,24 @@ class TestBasicAuthBruteForce:
         assert client.get("/ping", auth=("admin", "admin")).status_code == 429
         assert client.get("/ping", auth=("other", "x")).status_code == 401
 
+    def test_per_username_limit_does_not_lock_out_recently_logged_in_client(self):
+        client = _basicauth_client(delay_after_failure=0, max_failures_per_username=2)
+        assert client.get("/ping", auth=("admin", "admin")).status_code == 200
+
+        client.basic_auth.failed_attempts_per_username.record("admin")
+        client.basic_auth.failed_attempts_per_username.record("admin")
+
+        assert client.get("/ping", auth=("admin", "admin")).status_code == 200
+        assert client.basic_auth.failed_attempts_per_username.retry_after("admin") > 0
+
+    def test_per_username_limit_still_applies_to_other_clients_of_a_known_user(self):
+        client = _basicauth_client(delay_after_failure=0, max_failures_per_username=2)
+        client.basic_auth.recent_logins.add("admin", "198.51.100.1")
+
+        assert client.get("/ping", auth=("admin", "wrong1")).status_code == 401
+        assert client.get("/ping", auth=("admin", "wrong2")).status_code == 401
+        assert client.get("/ping", auth=("admin", "admin")).status_code == 429
+
     def test_per_username_limit_can_be_disabled(self):
         client = _basicauth_client(delay_after_failure=0, max_failures_per_username=None)
 
@@ -175,6 +193,18 @@ class TestFailedAttempts:
         assert attempts.retry_after("a", now=21) == 39
         assert attempts.retry_after("a", now=61) == 0
 
+    def test_recent_logins_expire_and_are_bounded(self):
+        logins = auth.RecentLogins(ttl=10, max_entries=2)
+        logins.add("admin", "a", now=0)
+        logins.add("admin", "b", now=1)
+        logins.add("admin", "c", now=2)
+
+        assert not logins.contains("admin", "a", now=3)
+        assert logins.contains("admin", "c", now=3)
+        assert not logins.contains("other", "c", now=3)
+        assert not logins.contains("admin", "c", now=12)
+        assert len(logins) == 0
+
     def test_store_is_bounded(self):
         attempts = auth.FailedAttempts(window=3600, max_entries=100)
         for i in range(10000):
@@ -203,3 +233,8 @@ class TestClientIp:
     def test_real_ip_is_used_behind_trusted_proxy(self):
         request = _request("10.0.0.5", {"X-Real-IP": "203.0.113.9"})
         assert auth._client_ip(request, auth._parse_networks(["10.0.0.0/8"])) == "203.0.113.9"
+
+    def test_peer_already_resolved_by_uvicorn_is_kept(self):
+        trusted = auth._parse_networks(["10.0.0.0/8"])
+        request = _request("10.1.2.3", {"X-Forwarded-For": "1.1.1.1, 10.1.2.3"})
+        assert auth._client_ip(request, trusted) == "10.1.2.3"
