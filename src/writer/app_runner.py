@@ -1066,6 +1066,7 @@ class AppRunner:
     ) -> AppProcessServerResponse:
         if self.mode != "edit":
             raise PermissionError("Cannot update components in non-update mode.")
+        wf_project.validate_component_ids(payload.components)
         self.bmc_components = payload.components
 
         wf_project.write_files_async(
@@ -1211,7 +1212,8 @@ class AppRunner:
                     raise ValueError(".wf directory not found alongside main.py in the archive.")
 
                 # Parse files to ensure there are no errors
-                wf_project.read_files(main_py_dir)
+                imported_metadata, imported_components = wf_project.read_files(main_py_dir)
+                wf_project.validate_component_ids(imported_components)
 
                 # Passed all checks; replace current app contents
 
@@ -1223,6 +1225,10 @@ class AppRunner:
 
                 self._start_fs_observer()
                 self.bmc_components = self._load_persisted_components()
+                # Supersedes any save still pending in the saver, so it can't overwrite the imported files.
+                wf_project.write_files_async(
+                    self.wf_project_context, imported_metadata, self.bmc_components
+                )
                 self.reload_code_from_saved()
         except zipfile.BadZipFile:
             raise ValueError("Uploaded file is not a valid ZIP.")

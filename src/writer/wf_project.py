@@ -14,17 +14,19 @@ import logging
 import multiprocessing
 import os
 import queue
+import re
 import time
 import typing
 from collections import OrderedDict
 from multiprocessing import Queue
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from writer import core_ui
 from writer.ss_types import ComponentDefinition, MetadataDefinition, SourceFilesDirectory
 
 ROOTS = ['root', 'blueprints_root']
 COMPONENT_ROOTS = ['page', 'blueprints_blueprint']
+COMPONENT_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
 
 shared_queue_write_files: typing.Optional[Queue] = None
 
@@ -35,6 +37,28 @@ class WfProjectContext:
     write_files_async_process: typing.Optional[multiprocessing.Process] = None
     write_files_async_stop: Any = dataclasses.field(default_factory=multiprocessing.Event)  # Note: Event is a function, not a class in python, it can't be typed
     file_hashes: Dict[str, str] = dataclasses.field(default_factory=dict)
+
+
+class InvalidComponentIdError(ValueError):
+    pass
+
+
+def validate_component_ids(components: Dict[str, ComponentDefinition]) -> None:
+    """
+    Ensures that the ids of the components stored in their own `.wf` file
+    (pages and blueprints) are safe to embed in a file name.
+
+    >>> wf_project.validate_component_ids(components)
+    """
+    for c in components.values():
+        if not isinstance(c, dict) or c.get("type") not in COMPONENT_ROOTS:
+            continue
+        component_id = c.get("id")
+        if not isinstance(component_id, str) or not COMPONENT_ID_PATTERN.fullmatch(component_id):
+            raise InvalidComponentIdError(
+                f"Invalid {c.get('type')} component id {component_id!r}. "
+                "Only letters, digits, '_' and '-' are allowed."
+            )
 
 
 def write_files_async(context: WfProjectContext, metadata: MetadataDefinition, components: Dict[str, ComponentDefinition]) -> None:
@@ -180,6 +204,7 @@ def _expected_component_fileinfos(components: dict[str, ComponentDefinition]) ->
     >>> for component_id, filename in component_files:
     >>>     print(f"Components that depends on {component_id} will be written in {filename}")
     """
+    validate_component_ids(components)
     expected_component_files = []
     for component_file_root in COMPONENT_ROOTS:
         position = 0
@@ -244,7 +269,7 @@ def _write_component_files(wf_directory: str, components: Dict[str, ComponentDef
             [json.dumps(_sort_wf_component_keys(p)) + "\n" for p in _order_components(filtered_components)]
         )
 
-        has_changed = _has_file_hash_changed(filename, file_contents, context)
+        has_changed = _has_file_hash_changed(filename, file_contents, context, file_path)
         if not has_changed:
             continue
 
@@ -260,17 +285,18 @@ def _write_root_files(wf_directory, components, context: WfProjectContext):
         if root_component:
             file_contents = json.dumps(_sort_wf_component_keys(root_component))
 
-            has_changed = _has_file_hash_changed(f"components-{root}.jsonl", file_contents, context)
+            file_path = os.path.join(wf_directory, f"components-{root}.jsonl")
+            has_changed = _has_file_hash_changed(f"components-{root}.jsonl", file_contents, context, file_path)
             if not has_changed:
                 continue
 
-            with io.open(os.path.join(wf_directory, f"components-{root}.jsonl"), "w") as f:
+            with io.open(file_path, "w") as f:
                 f.write(file_contents)
                 f.flush()
                 os.fsync(f.fileno())
 
 
-def _has_file_hash_changed(file_name: str, new_contents: str, context: WfProjectContext) -> bool:
+def _has_file_hash_changed(file_name: str, new_contents: str, context: WfProjectContext, file_path: Optional[str] = None) -> bool:
     """
     Returns whether a hash of a file changed given new file contents;
 
@@ -280,6 +306,8 @@ def _has_file_hash_changed(file_name: str, new_contents: str, context: WfProject
 
     old_hash = context.file_hashes.get(file_name)
     context.file_hashes[file_name] = new_hash
+    if file_path is not None and not os.path.isfile(file_path):
+        return True
     return old_hash != new_hash
 
 
@@ -302,6 +330,9 @@ def _order_components(components: Dict[str, ComponentDefinition]) -> List[Compon
 
 
 def _start_process_write_files_async_process(context: WfProjectContext, save_interval, stop_event):
+    logger = logging.getLogger("writer")
+    pending = None
+    pending_failed = False
     while True:
         if stop_event.is_set():
             break
@@ -312,8 +343,25 @@ def _start_process_write_files_async_process(context: WfProjectContext, save_int
             obj = None
 
         if obj is not None:
-            app_path, metadata, components = obj
-            write_files(app_path, metadata, components, context)
+            pending = obj
+            pending_failed = False
+
+        if pending is not None:
+            app_path, metadata, components = pending
+            try:
+                write_files(app_path, metadata, components, context)
+                if pending_failed:
+                    logger.info("Project files saved after a previous failure.")
+                pending = None
+            except InvalidComponentIdError:
+                logger.exception("Couldn't save project files.")
+                pending = None
+            except Exception:
+                # Kept pending and retried on the next tick unless a newer save supersedes it.
+                if not pending_failed:
+                    logger.exception("Couldn't save project files. Retrying.")
+                pending_failed = True
+                context.file_hashes.clear()
 
         time.sleep(save_interval)
 

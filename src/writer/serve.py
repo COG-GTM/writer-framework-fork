@@ -42,7 +42,7 @@ from pydantic import ValidationError
 from starlette.websockets import WebSocket, WebSocketDisconnect, WebSocketState
 
 import writer
-from writer import VERSION, abstract
+from writer import VERSION, abstract, wf_project
 from writer.ai import Graph
 from writer.app_runner import AppRunner
 from writer.ss_types import (
@@ -765,13 +765,16 @@ def get_asgi_app(
             payload=None,
         )
         if req_message.type == "componentUpdate":
-            await app_runner.update_components(
-                session_id,
-                ComponentUpdateRequestPayload(components=req_message.payload["components"]),
-            )
-            await app_runner.queue_announcement_async(
-                "componentUpdate", req_message.payload["components"], session_id
-            )
+            try:
+                await app_runner.update_components(
+                    session_id,
+                    ComponentUpdateRequestPayload(components=req_message.payload["components"]),
+                )
+                await app_runner.queue_announcement_async(
+                    "componentUpdate", req_message.payload["components"], session_id
+                )
+            except wf_project.InvalidComponentIdError as error:
+                response.payload = {"error": str(error)}
         elif req_message.type == "collaborationPing":
             await app_runner.queue_announcement_async(
                 "collaborationUpdate", req_message.payload, exclude_session_id=session_id

@@ -1,5 +1,7 @@
 import json
 import mimetypes
+import shutil
+import time
 from typing import Any
 
 import fastapi
@@ -7,7 +9,9 @@ import fastapi.testclient
 import pytest
 import writer.abstract
 import writer.serve
+import writer.wf_project
 from fastapi import FastAPI
+from writer.app_runner import AppRunner
 
 from tests.backend import test_app_dir, test_multiapp_dir
 
@@ -406,3 +410,50 @@ class TestServe:
             response_json = res.json()
             assert response_json["status"] == "error"
             assert "Project saver process is not running" in response_json["message"]
+
+
+class TestComponentUpdateIdValidation:
+
+    def _send_component_update(self, websocket, tracking_id: int, components: dict) -> dict:
+        websocket.send_json({
+            "type": "componentUpdate",
+            "trackingId": tracking_id,
+            "payload": {"components": components},
+        })
+        while True:
+            message = json.loads(websocket.receive_bytes().decode())
+            if message.get("trackingId") == tracking_id:
+                return message
+
+    def test_component_update_with_unsafe_page_id_is_rejected_and_saver_keeps_running(self, tmp_path):
+        app_dir = tmp_path / "app"
+        shutil.copytree(test_app_dir, app_dir)
+        _, components = writer.wf_project.read_files(str(app_dir))
+        new_page = {"type": "page", "content": {}, "isCodeManaged": False, "position": 99, "parentId": "root"}
+
+        asgi_app = writer.serve.get_asgi_app(str(app_dir), "edit")
+        app_runner = asgi_app.state.app_runner
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            origin = {"Origin": "http://localhost"}
+            session_id = client.post("/api/init", json={"proposedSessionId": None}, headers=origin).json()["sessionId"]
+            with client.websocket_connect("/api/stream", headers=origin) as websocket:
+                websocket.send_json({"type": "streamInit", "trackingId": 0, "payload": {"sessionId": session_id}})
+
+                unsafe = dict(components, **{"x/y": dict(new_page, id="x/y")})
+                response = self._send_component_update(websocket, 1, unsafe)
+                assert "Invalid page component id" in response["payload"]["error"]
+                time.sleep(4 * AppRunner.WF_PROJECT_SAVE_INTERVAL + 0.5)
+                assert client.get("/api/health").status_code == 200
+                assert "x/y" not in app_runner.bmc_components
+
+                valid = dict(components, **{"valid-page_1": dict(new_page, id="valid-page_1")})
+                response = self._send_component_update(websocket, 2, valid)
+                assert response["payload"] is None
+                saved = list((app_dir / ".wf").glob("components-page-*-valid-page_1.jsonl"))
+                deadline = time.time() + 4 * AppRunner.WF_PROJECT_SAVE_INTERVAL + 5
+                while not saved and time.time() < deadline:
+                    time.sleep(0.1)
+                    saved = list((app_dir / ".wf").glob("components-page-*-valid-page_1.jsonl"))
+                assert saved
+                assert client.get("/api/health").status_code == 200
+                websocket.close(1000)

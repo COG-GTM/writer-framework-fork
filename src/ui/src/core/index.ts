@@ -984,6 +984,10 @@ export function generateCore() {
 					pendingComponentUpdate = true;
 					return reject("Couldn't connect to the server.");
 				}
+				if (r.payload?.error) {
+					logger.error("Component update rejected", r.payload.error);
+					return reject(r.payload.error);
+				}
 				resolve();
 			};
 			sendFrontendMessage("componentUpdate", payload, messageCallback);
