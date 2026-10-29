@@ -20,6 +20,7 @@ from writer import audit_and_fix, wf_project
 from writer.core import (
     BytesWrapper,
     EventDeserialiser,
+    EventHandler,
     FileWrapper,
     MutableValue,
     SessionManager,
@@ -30,6 +31,7 @@ from writer.core import (
     import_failure,
     parse_state_variable_expression,
 )
+from writer.core_ui import Component
 from writer.ss_types import WriterEvent
 
 from tests.backend import test_app_dir
@@ -944,6 +946,54 @@ class TestEventDeserialiser:
             assert EventDeserialiser._decode_data_url("data:,A%41%41%41") == b"AAAA"
             with pytest.raises(ValueError):
                 EventDeserialiser._decode_data_url("data:,hello")
+
+    @pytest.mark.parametrize("url", ["file:///etc/hostname", "http://127.0.0.1:1/"])
+    def test_file_change_event_does_not_fetch_or_bind(self, url) -> None:
+        file_session = wf.session_manager.get_new_session()
+        file_session.session_state = WriterState({"uploaded": "untouched"})
+        file_session.session_component_tree.attach(
+            Component(
+                id="ssrf-file-input",
+                type="fileinput",
+                parentId="root",
+                binding={"eventType": "wf-file-change", "stateRef": "uploaded"},
+            )
+        )
+        ev = WriterEvent(
+            type="wf-file-change",
+            instancePath=[{"componentId": "ssrf-file-input", "instanceNumber": 0}],
+            payload=[{"name": "x", "type": "text/plain", "data": url}],
+        )
+        handler = EventHandler(file_session)
+        with mock.patch("urllib.request.urlopen") as urlopen, mock.patch.object(
+            handler, "_handle_component_event"
+        ) as component_event:
+            result = handler.handle(ev)
+        assert result["ok"] is False
+        urlopen.assert_not_called()
+        component_event.assert_not_called()
+        assert file_session.session_state["uploaded"] == "untouched"
+
+    def test_file_change_event_binds_decoded_data_url(self) -> None:
+        file_session = wf.session_manager.get_new_session()
+        file_session.session_state = WriterState({"uploaded": None})
+        file_session.session_component_tree.attach(
+            Component(
+                id="data-url-file-input",
+                type="fileinput",
+                parentId="root",
+                binding={"eventType": "wf-file-change", "stateRef": "uploaded"},
+            )
+        )
+        ev = WriterEvent(
+            type="wf-file-change",
+            instancePath=[{"componentId": "data-url-file-input", "instanceNumber": 0}],
+            payload=[{"name": "hello.txt", "type": "text/plain",
+                      "data": "data:text/plain;base64,aGVsbG8gd29ybGQ="}],
+        )
+        result = EventHandler(file_session).handle(ev)
+        assert result["ok"] is True, result
+        assert file_session.session_state["uploaded"][0]["data"] == b"hello world"
 
     def test_date_change(self) -> None:
         ev_invalid = WriterEvent(
