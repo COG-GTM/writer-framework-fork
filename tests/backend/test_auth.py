@@ -147,6 +147,15 @@ class TestBasicAuthBruteForce:
         assert client.get("/ping", auth=("admin", "admin")).status_code == 200
         assert client.basic_auth.failed_attempts_per_username.retry_after("admin") > 0
 
+    def test_recently_logged_in_client_keeps_its_own_username_limit(self):
+        client = _basicauth_client(delay_after_failure=0, max_failures_per_username=2)
+        assert client.get("/ping", auth=("admin", "admin")).status_code == 200
+
+        assert client.get("/ping", auth=("admin", "wrong1")).status_code == 401
+        assert client.get("/ping", auth=("admin", "wrong2")).status_code == 401
+        assert client.get("/ping", auth=("admin", "wrong3")).status_code == 429
+        assert client.basic_auth.failed_attempts_per_username.retry_after("admin") == 0
+
     def test_per_username_limit_still_applies_to_other_clients_of_a_known_user(self):
         client = _basicauth_client(delay_after_failure=0, max_failures_per_username=2)
         client.basic_auth.recent_logins.add("admin", "198.51.100.1")
@@ -234,7 +243,7 @@ class TestClientIp:
         request = _request("10.0.0.5", {"X-Real-IP": "203.0.113.9"})
         assert auth._client_ip(request, auth._parse_networks(["10.0.0.0/8"])) == "203.0.113.9"
 
-    def test_peer_already_resolved_by_uvicorn_is_kept(self):
+    def test_client_behind_trusted_proxy_is_keyed_on_its_own_address(self):
         trusted = auth._parse_networks(["10.0.0.0/8"])
-        request = _request("10.1.2.3", {"X-Forwarded-For": "1.1.1.1, 10.1.2.3"})
-        assert auth._client_ip(request, trusted) == "10.1.2.3"
+        request = _request("10.0.0.5", {"X-Forwarded-For": "203.0.113.9, 10.0.0.5"})
+        assert auth._client_ip(request, trusted) == "203.0.113.9"

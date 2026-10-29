@@ -179,16 +179,18 @@ class BasicAuth(Auth):
     `max_failures_per_username` failed logins (10 by default) in that window. Set `max_failures_per_username=None`
     to disable the per-username limit.
 
-    So that failed guesses cannot lock legitimate users out, the per-username limit does not apply to a client IP
-    that logged in successfully with that username within `known_client_ttl` (24 hours by default). During an
-    attack, only clients that have not logged in recently may get 429 for that username.
+    So that failed guesses cannot lock legitimate users out, a client IP that logged in successfully with a username
+    within `known_client_ttl` (24 hours by default) gets its own per-username counter for that username, with the
+    same limit, instead of sharing the global one. During an attack, only clients that have not logged in recently
+    may get 429 for that username.
 
     The client IP is the address of the TCP peer (`request.client.host`). When uvicorn runs with `--proxy-headers`
     (the default), it already rewrites the peer from `X-Forwarded-For` for the proxies listed in `--forwarded-allow-ips`.
     `X-Forwarded-For` / `X-Real-IP` are only read by Writer Framework when the peer is listed in `trusted_proxies`
     (IP addresses or CIDR ranges); otherwise they are ignored, because any client can set them. List only the
-    proxies themselves: any peer in `trusted_proxies` can choose the IP it is throttled under. If uvicorn already
-    rewrote the peer from `X-Forwarded-For` (its right-most hop equals the peer), the peer is used as is.
+    proxies themselves: any peer in `trusted_proxies` can choose the IP it is throttled under. Resolve forwarded
+    headers in one place only: either let uvicorn do it (`--proxy-headers --forwarded-allow-ips=<proxies>`) and leave
+    `trusted_proxies` empty, or set `trusted_proxies` and do not list the proxies in `--forwarded-allow-ips`.
 
     >>> _auth = auth.BasicAuth(
     >>>     login=os.getenv('LOGIN'),
@@ -276,8 +278,9 @@ class BasicAuth(Auth):
                 except (binascii.Error, UnicodeDecodeError, ValueError):
                     raise Unauthorized()
 
-                if self.max_failures_per_username and not recent_logins.contains(username, client_ip):
-                    remaining_time = failed_attempts_per_username.retry_after(username)
+                if self.max_failures_per_username:
+                    username_key = _username_key(username, client_ip, recent_logins)
+                    remaining_time = failed_attempts_per_username.retry_after(username_key)
                     if remaining_time > 0:
                         raise Unauthorized(status_code=429, message="Too Many Requests", more_info=f"Too many failed logins for this user. Your next try is in {int(remaining_time)}s.")
 
@@ -295,7 +298,7 @@ class BasicAuth(Auth):
                 if exc.status_code != 429:
                     failed_attempts.record(client_ip)
                     if username is not None and self.max_failures_per_username:
-                        failed_attempts_per_username.record(username)
+                        failed_attempts_per_username.record(_username_key(username, client_ip, recent_logins))
 
                     if self.block_user_after_failure:
                         await asyncio.sleep(self.delay_after_failure)
@@ -557,6 +560,16 @@ def urlstrip(url_path: str):
     """
     return url_path.strip('/')
 
+def _username_key(username: str, client_ip: str, recent_logins: RecentLogins) -> str:
+    """
+    Key of the per-username failure counter: shared by all clients, except clients that recently
+    logged in with this username, which are counted separately so others cannot lock them out.
+    """
+    if recent_logins.contains(username, client_ip):
+        return f"{username}\x00{client_ip}"
+    return username
+
+
 def _parse_networks(addresses: Sequence[str]) -> List[IPNetwork]:
     """
     >>> _parse_networks(["10.0.0.0/8", "127.0.0.1"])
@@ -590,9 +603,6 @@ def _client_ip(request: Request, trusted_networks: Sequence[IPNetwork] = ()) -> 
     x_forwarded_for = request.headers.get("X-Forwarded-For")
     if x_forwarded_for:
         hops = [hop.strip() for hop in x_forwarded_for.split(",") if hop.strip()]
-        if hops and hops[-1] == peer_ip:
-            # uvicorn --proxy-headers already resolved the peer from this header
-            return peer_ip
         for hop in reversed(hops):
             if not _is_trusted(hop, trusted_networks):
                 return hop
