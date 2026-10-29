@@ -406,3 +406,95 @@ class TestServe:
             response_json = res.json()
             assert response_json["status"] == "error"
             assert "Project saver process is not running" in response_json["message"]
+
+
+REMOTE_PEER = ("203.0.113.7", 50000)
+LOOPBACK_PEER = ("127.0.0.1", 50000)
+LOCAL_ORIGIN = {"Origin": "http://localhost"}
+
+
+def _init(client, headers=None):
+    return client.post(
+        "/api/init",
+        json={"proposedSessionId": None},
+        headers={"Content-Type": "application/json", **(headers or {})},
+    )
+
+
+def _stream_close_code(client, headers=None):
+    with client.websocket_connect("/api/stream", headers=headers) as websocket:
+        with pytest.raises(fastapi.WebSocketDisconnect) as disconnect:
+            websocket.receive_json()
+    return disconnect.value.code
+
+
+class TestEditModeRemoteAccess:
+
+    @pytest.mark.parametrize("host,expected", [
+        ("127.0.0.1", True),
+        ("127.10.0.1", True),
+        ("::1", True),
+        ("::ffff:127.0.0.1", True),
+        ("10.0.0.5", False),
+        ("203.0.113.7", False),
+        ("::ffff:203.0.113.7", False),
+        ("localhost", False),
+        ("testclient", False),
+        ("", False),
+        (None, False),
+    ])
+    def test_is_loopback_host(self, host, expected):
+        assert writer.serve._is_loopback_host(host) is expected
+
+    def test_remote_peer_with_spoofed_local_origin_is_rejected(self):
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "edit")
+        with fastapi.testclient.TestClient(asgi_app, client=REMOTE_PEER) as client:
+            res = _init(client, LOCAL_ORIGIN)
+            assert res.status_code == 403
+            assert "sessionId" not in res.json()
+            assert "apiKey" not in res.text
+
+            assert _stream_close_code(client, LOCAL_ORIGIN) == 1008
+
+            assert client.get("/api/export", headers=LOCAL_ORIGIN).status_code == 403
+            res = client.post(
+                "/api/import",
+                headers=LOCAL_ORIGIN,
+                files={"file": ("agent.zip", b"PK", "application/zip")},
+            )
+            assert res.status_code == 403
+            res = client.post("/api/data/retrieve", headers=LOCAL_ORIGIN, json={})
+            assert res.status_code == 403
+            res = client.post("/api/data/delete", headers=LOCAL_ORIGIN, json={"keys": []})
+            assert res.status_code == 403
+            res = client.post("/api/autogen", headers=LOCAL_ORIGIN, json={"description": "x"})
+            assert res.status_code == 403
+
+    def test_loopback_peer_with_local_origin_gets_edit_session(self):
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "edit")
+        with fastapi.testclient.TestClient(asgi_app, client=LOOPBACK_PEER) as client:
+            res = _init(client, LOCAL_ORIGIN)
+            assert res.status_code == 200
+            assert res.json()["mode"] == "edit"
+            assert res.json()["sessionId"]
+
+    def test_loopback_peer_with_foreign_origin_is_still_rejected(self):
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "edit")
+        with fastapi.testclient.TestClient(asgi_app, client=LOOPBACK_PEER) as client:
+            assert _init(client, {"Origin": "http://evil.example"}).status_code == 403
+            assert _init(client).status_code == 403
+            assert _stream_close_code(client, {"Origin": "http://evil.example"}) == 1008
+
+    def test_enable_remote_edit_allows_remote_peers(self):
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "edit", enable_remote_edit=True)
+        with fastapi.testclient.TestClient(asgi_app, client=REMOTE_PEER) as client:
+            res = _init(client, {"Origin": "http://editor.example"})
+            assert res.status_code == 200
+            assert res.json()["mode"] == "edit"
+
+    def test_run_mode_is_not_restricted_to_loopback_peers(self):
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "run")
+        with fastapi.testclient.TestClient(asgi_app, client=REMOTE_PEER) as client:
+            res = _init(client)
+            assert res.status_code == 200
+            assert res.json()["mode"] == "run"
