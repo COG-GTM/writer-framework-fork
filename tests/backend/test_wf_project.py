@@ -300,3 +300,22 @@ def test_wf_project_saver_retries_failed_save(monkeypatch):
     assert len(calls) == 2
     assert calls[1] is components
     assert context.file_hashes == {}
+
+
+def test_wf_project_write_files_rewrites_missing_file_despite_cached_hash():
+    with tempfile.TemporaryDirectory('test_wf_project_missing_file') as tmp_app_dir:
+        context = wf_project.WfProjectContext(app_path=tmp_app_dir)
+        components = _components_with_page_id("page-1")
+        wf_project.write_files(tmp_app_dir, {'writer_version': '0.1.0'}, components, context)
+        wf_dir = os.path.join(tmp_app_dir, '.wf')
+        os.rename(
+            os.path.join(wf_dir, 'components-page-0-page-1.jsonl'),
+            os.path.join(wf_dir, 'components-page-1-page-1.jsonl'),
+        )
+        os.remove(os.path.join(wf_dir, 'components-root.jsonl'))
+
+        wf_project.write_files(tmp_app_dir, {'writer_version': '0.1.0'}, components, context)
+
+        assert os.path.isfile(os.path.join(wf_dir, 'components-page-0-page-1.jsonl'))
+        assert os.path.isfile(os.path.join(wf_dir, 'components-root.jsonl'))
+        assert not os.path.isfile(os.path.join(wf_dir, 'components-page-1-page-1.jsonl'))

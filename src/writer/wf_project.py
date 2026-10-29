@@ -19,7 +19,7 @@ import time
 import typing
 from collections import OrderedDict
 from multiprocessing import Queue
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from writer import core_ui
 from writer.ss_types import ComponentDefinition, MetadataDefinition, SourceFilesDirectory
@@ -269,7 +269,7 @@ def _write_component_files(wf_directory: str, components: Dict[str, ComponentDef
             [json.dumps(_sort_wf_component_keys(p)) + "\n" for p in _order_components(filtered_components)]
         )
 
-        has_changed = _has_file_hash_changed(filename, file_contents, context)
+        has_changed = _has_file_hash_changed(filename, file_contents, context, file_path)
         if not has_changed:
             continue
 
@@ -285,17 +285,18 @@ def _write_root_files(wf_directory, components, context: WfProjectContext):
         if root_component:
             file_contents = json.dumps(_sort_wf_component_keys(root_component))
 
-            has_changed = _has_file_hash_changed(f"components-{root}.jsonl", file_contents, context)
+            file_path = os.path.join(wf_directory, f"components-{root}.jsonl")
+            has_changed = _has_file_hash_changed(f"components-{root}.jsonl", file_contents, context, file_path)
             if not has_changed:
                 continue
 
-            with io.open(os.path.join(wf_directory, f"components-{root}.jsonl"), "w") as f:
+            with io.open(file_path, "w") as f:
                 f.write(file_contents)
                 f.flush()
                 os.fsync(f.fileno())
 
 
-def _has_file_hash_changed(file_name: str, new_contents: str, context: WfProjectContext) -> bool:
+def _has_file_hash_changed(file_name: str, new_contents: str, context: WfProjectContext, file_path: Optional[str] = None) -> bool:
     """
     Returns whether a hash of a file changed given new file contents;
 
@@ -305,6 +306,8 @@ def _has_file_hash_changed(file_name: str, new_contents: str, context: WfProject
 
     old_hash = context.file_hashes.get(file_name)
     context.file_hashes[file_name] = new_hash
+    if file_path is not None and not os.path.isfile(file_path):
+        return True
     return old_hash != new_hash
 
 
