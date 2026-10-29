@@ -181,7 +181,26 @@ class Oidc(Auth):
     authlib: OAuth2Session = None
     callback_func: Optional[Callable[[Request, str, dict], None]] = None # Callback to validate user authentication
     unauthorized_action: Optional[Callable[[Request, Unauthorized], Response]] = None # Callback to build its own page when a user is not allowed
+    authenticated_session_ttl: int = 3600  # seconds during which a session id issued by the OIDC callback is accepted
 
+    _authenticated_sessions: Dict[str, float] = dataclasses.field(default_factory=dict, init=False, repr=False)
+
+    def _register_authenticated_session(self, session_id: str) -> None:
+        self._authenticated_sessions[session_id] = time.time()
+
+    def _is_authenticated_session(self, session_id: Optional[str]) -> bool:
+        """
+        Checks that a session id was issued by the OIDC callback after a successful login
+        and has not expired. Any other value, such as one chosen by the client, is rejected.
+        """
+        now = time.time()
+        expired = [sid for sid, issued_at in self._authenticated_sessions.items() if now - issued_at > self.authenticated_session_ttl]
+        for sid in expired:
+            del self._authenticated_sessions[sid]
+
+        if session_id is None:
+            return False
+        return session_id in self._authenticated_sessions
 
     def register(self,
                  asgi_app: WriterFastAPI,
@@ -226,9 +245,10 @@ class Oidc(Auth):
         @asgi_app.middleware("http")
         async def oidc_middleware(request: Request, call_next):
             session = request.cookies.get('session')
+            is_authenticated = self._is_authenticated_session(session)
 
             is_one_of_url_prefix_allowed = any(request.url.path.startswith(url_prefix) for url_prefix in auth_authorized_prefix_paths)
-            if session is not None or request.url.path in auth_authorized_routes or is_one_of_url_prefix_allowed:
+            if is_authenticated or request.url.path in auth_authorized_routes or is_one_of_url_prefix_allowed:
                 response: Response = await call_next(request)
                 return response
             else:
@@ -258,6 +278,7 @@ class Oidc(Auth):
                 if self.url_userinfo:
                     app_runner.set_userinfo(session_id=session_id, userinfo=userinfo)
 
+                self._register_authenticated_session(session_id)
                 response.set_cookie(key="session", value=session_id, httponly=True)
                 return response
             except Unauthorized as exc:

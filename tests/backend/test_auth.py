@@ -2,9 +2,10 @@ import fastapi
 import fastapi.testclient
 import pytest
 import writer.serve
+from starlette.websockets import WebSocketDisconnect
 from writer import auth
 
-from tests.backend import test_basicauth_dir
+from tests.backend import test_app_dir, test_basicauth_dir
 
 
 class TestAuth:
@@ -72,3 +73,72 @@ class TestAuth:
     ])
     def test_urljoin_scenarios(self, path1: str, path2, expected_path: str):
         assert auth.urljoin(path1, path2) == expected_path
+
+
+class TestOidcAuth:
+
+    @staticmethod
+    def _build_app():
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "run", enable_server_setup=False)
+        oidc = auth.Oidc(
+            client_id="client_id",
+            client_secret="client_secret",
+            host_url="http://testserver",
+            url_authorize="https://idp.example.com/authorize",
+            url_oauthtoken="https://idp.example.com/token",
+        )
+        oidc.register(asgi_app)
+        oidc.authlib.fetch_token = lambda *args, **kwargs: {"access_token": "token"}
+        return asgi_app, oidc
+
+    def test_oidc_should_redirect_anonymous_user_to_identity_provider(self):
+        asgi_app, _ = self._build_app()
+        with fastapi.testclient.TestClient(asgi_app, follow_redirects=False) as client:
+            res = client.post("/api/init", json={})
+            assert res.status_code == 307
+            assert res.headers["location"].startswith("https://idp.example.com/authorize")
+
+    def test_oidc_should_reject_session_cookie_not_issued_by_callback(self):
+        asgi_app, _ = self._build_app()
+        forged_session_id = "a" * 64
+        with fastapi.testclient.TestClient(asgi_app, follow_redirects=False) as client:
+            client.cookies.set("session", forged_session_id)
+            res = client.post("/api/init", json={})
+            assert res.status_code == 307
+            assert res.headers["location"].startswith("https://idp.example.com/authorize")
+
+            client.cookies.clear()
+            with client.websocket_connect("/api/stream") as websocket:
+                websocket.send_json({
+                    "type": "streamInit",
+                    "trackingId": 0,
+                    "payload": {"sessionId": forged_session_id},
+                })
+                with pytest.raises(WebSocketDisconnect) as exc:
+                    websocket.receive_json()
+                assert exc.value.code == 1008
+
+    def test_oidc_should_accept_session_cookie_issued_by_callback(self):
+        asgi_app, _ = self._build_app()
+        with fastapi.testclient.TestClient(asgi_app, follow_redirects=False) as client:
+            res = client.get("/authorize?code=abc&state=xyz")
+            assert res.status_code == 307
+            session_id = res.cookies.get("session")
+            assert session_id is not None
+
+            client.cookies.set("session", session_id)
+            res = client.post("/api/init", json={})
+            assert res.status_code == 200
+            assert res.json().get("sessionId") == session_id
+
+    def test_oidc_should_reject_expired_session_cookie(self):
+        asgi_app, oidc = self._build_app()
+        oidc.authenticated_session_ttl = -1
+        with fastapi.testclient.TestClient(asgi_app, follow_redirects=False) as client:
+            res = client.get("/authorize?code=abc&state=xyz")
+            session_id = res.cookies.get("session")
+            assert session_id is not None
+
+            client.cookies.set("session", session_id)
+            res = client.post("/api/init", json={})
+            assert res.status_code == 307
