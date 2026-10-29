@@ -204,3 +204,60 @@ def test_request_without_secrets_is_unchanged(session, runner, monkeypatch):
     assert block.result["request"]["url"] == "https://api.example.com/items"
     assert block.result["request"]["headers"]["x-custom"] == "plain"
     assert block.result["headers"]["x-echo"] == "plain"
+
+
+def _reflecting_handler(request: httpx.Request) -> httpx.Response:
+    auth = request.headers.get("Authorization", "")
+    if request.url.path == "/text":
+        return httpx.Response(401, headers={"Content-Type": "text/plain"}, text=f"bad token: {auth}")
+    return httpx.Response(
+        200,
+        headers={"Content-Type": "application/json"},
+        json={"received": {"authorization": auth}, "items": [auth, 1]},
+    )
+
+
+def test_secrets_reflected_in_response_body_are_redacted(session, runner, monkeypatch):
+    component = session.add_fake_component(
+        {
+            "url": "https://api.example.com/json",
+            "headers": '{"Authorization": "Bearer @{vault.API_KEY}"}',
+        }
+    )
+    block = HTTPRequest(component, runner, {"vault": {"API_KEY": VAULT_SECRET}})
+    monkeypatch.setattr(
+        block,
+        "acquire_httpx_client",
+        lambda: block.create_httpx_client(transport=httpx.MockTransport(_reflecting_handler)),
+    )
+    block.run()
+
+    assert block.outcome == "success"
+    assert block.result["body"] == {
+        "received": {"authorization": "Bearer [REDACTED]"},
+        "items": ["Bearer [REDACTED]", 1],
+    }
+    assert VAULT_SECRET not in json.dumps(block.result)
+    assert VAULT_SECRET not in json.dumps(block.execution_environment["httpx_requests"])
+
+
+def test_secrets_reflected_in_error_response_are_redacted(session, runner, monkeypatch):
+    component = session.add_fake_component(
+        {
+            "url": "https://api.example.com/text",
+            "headers": '{"Authorization": "Bearer @{vault.API_KEY}"}',
+        }
+    )
+    block = HTTPRequest(component, runner, {"vault": {"API_KEY": VAULT_SECRET}})
+    monkeypatch.setattr(
+        block,
+        "acquire_httpx_client",
+        lambda: block.create_httpx_client(transport=httpx.MockTransport(_reflecting_handler)),
+    )
+    with pytest.raises(RuntimeError) as excinfo:
+        block.run()
+
+    assert block.outcome == "responseError"
+    assert block.result["body"] == "bad token: Bearer [REDACTED]"
+    assert VAULT_SECRET not in str(excinfo.value)
+    assert "[REDACTED]" in str(excinfo.value)

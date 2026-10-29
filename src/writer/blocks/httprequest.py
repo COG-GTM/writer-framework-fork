@@ -2,7 +2,13 @@ import json
 
 from writer.abstract import register_abstract_template
 from writer.blocks.base_block import BlueprintBlock
-from writer.blocks.redaction import redact_body, redact_headers, redact_url
+from writer.blocks.redaction import (
+    redact_body,
+    redact_headers,
+    redact_json_value,
+    redact_text,
+    redact_url,
+)
 from writer.ss_types import AbstractTemplate
 
 
@@ -120,7 +126,9 @@ class HTTPRequest(BlueprintBlock):
                     },
                     "headers": redact_headers(res.headers, secrets),
                     "status_code": res.status_code,
-                    "body": res.json() if is_response_json else res.text,
+                    "body": redact_json_value(res.json(), secrets)
+                    if is_response_json
+                    else redact_text(res.text, secrets),
                 }
 
                 if res.is_success:
@@ -128,7 +136,8 @@ class HTTPRequest(BlueprintBlock):
                 else:
                     self.outcome = "responseError"
                     raise RuntimeError(
-                        f"HTTP response with code {res.status_code} and message {res.text}"
+                        f"HTTP response with code {res.status_code} and message "
+                        f"{redact_text(res.text, secrets)}"
                     )
 
         except json.JSONDecodeError as e:

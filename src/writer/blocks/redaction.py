@@ -135,6 +135,16 @@ def redact_url(url: str, secrets: Iterable[str]) -> str:
     return redacted
 
 
+def redact_json_value(value: Any, secrets: Iterable[str]) -> Any:
+    """
+    Redacts secrets from an already-parsed JSON value, keeping its structure.
+    """
+    secrets = list(secrets)
+    if not secrets:
+        return value
+    return _redact_json_value(value, secrets)
+
+
 def _redact_json_value(value: Any, secrets: List[str]) -> Any:
     if isinstance(value, dict):
         return {redact_text(k, secrets): _redact_json_value(v, secrets) for k, v in value.items()}
