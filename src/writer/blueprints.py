@@ -247,16 +247,25 @@ class BlueprintRunner:
         if execution_environment is None:
             execution_environment = {}
 
+        blueprint = self.session.session_component_tree.get_component(blueprint_id)
+        if not blueprint or blueprint.type != "blueprints_blueprint":
+            raise ValueError(f'Blueprint "{blueprint_id}" was not found.')
+
         trigger_id = branch_id
         if trigger_id is not None:
-            # Determine trigger type from the component
             component = self.session.session_component_tree.get_component(trigger_id)
-            if component and component.type == "blueprints_apitrigger":
+            if not component or component.parentId != blueprint_id:
+                raise ValueError(
+                    f'Block "{trigger_id}" is not a trigger of blueprint "{blueprint_id}".'
+                )
+            if component.type == "blueprints_apitrigger":
                 trigger_type = "API"
-            elif component and component.type == "blueprints_crontrigger":
+            elif component.type == "blueprints_crontrigger":
                 trigger_type = "Cron"
             else:
-                trigger_type = "Branch"
+                raise ValueError(
+                    f'Block "{trigger_id}" is not an API or Cron trigger.'
+                )
         elif self.is_blueprint_api_available(blueprint_id):
             # Prioritize API trigger over Cron if both exist
             trigger_id = self.get_blueprint_api_trigger(blueprint_id)

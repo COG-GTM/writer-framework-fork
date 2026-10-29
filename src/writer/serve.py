@@ -396,14 +396,26 @@ def get_asgi_app(
             raise HTTPException(status_code=400, detail="Cannot parse the payload.")
         return payload
     
+    API_START_TRIGGER_TYPES = ("blueprints_apitrigger", "blueprints_crontrigger")
+
     def is_blueprint_triggerable(app_runner: AppRunner, blueprint_id: str) -> bool:
         """Check if blueprint has at least one supported trigger (API or Cron)."""
         if not app_runner.bmc_components:
             return False
-        supported_triggers = ("blueprints_apitrigger", "blueprints_crontrigger")
         return any(
-            comp["type"] in supported_triggers and comp.get("parentId") == blueprint_id
+            comp["type"] in API_START_TRIGGER_TYPES and comp.get("parentId") == blueprint_id
             for comp in app_runner.bmc_components.values()
+        )
+
+    def is_blueprint_trigger_block(app_runner: AppRunner, blueprint_id: str, block_id: str) -> bool:
+        """Check if block is an API or Cron trigger that belongs to the blueprint."""
+        if not app_runner.bmc_components:
+            return False
+        block = app_runner.bmc_components.get(block_id)
+        return bool(
+            block
+            and block.get("type") in API_START_TRIGGER_TYPES
+            and block.get("parentId") == blueprint_id
         )
 
     @app.get("/private/api/blueprints")
@@ -477,10 +489,10 @@ def get_asgi_app(
         # --- Blueprint discovery logic ---
 
         def check_blueprint(app_runner: AppRunner, blueprint_id: str) -> bool:
-            # Locate blueprint component by its key
             if not app_runner.bmc_components:
                 return False
-            return blueprint_id in app_runner.bmc_components
+            blueprint = app_runner.bmc_components.get(blueprint_id)
+            return bool(blueprint and blueprint.get("type") == "blueprints_blueprint")
 
         # --- Result serialization (recursive) ---
 
@@ -539,14 +551,12 @@ def get_asgi_app(
                     }))
                     return
 
-                if branch_id:
-                    block = app_runner.bmc_components.get(branch_id)
-                    if not block:
-                        await queue.put(await format_event("error", {
-                            "msg": f"Block '{branch_id}' was not found.",
-                            "finished_at": int(time.time())
-                        }))
-                        return
+                if branch_id and not is_blueprint_trigger_block(app_runner, blueprint_id, branch_id):
+                    await queue.put(await format_event("error", {
+                        "msg": f"Block '{branch_id}' is not an API or Cron trigger of blueprint '{blueprint_id}'.",
+                        "finished_at": int(time.time())
+                    }))
+                    return
 
                 await queue.put(await format_event("status", {"status": "executing", "msg": (f"Executing branch: {branch_id}..." if branch_id else f"Executing blueprint: {blueprint_id}...")}))
 
@@ -558,9 +568,9 @@ def get_asgi_app(
                             isSafe=True,
                             handler="run_blueprint_via_api",
                             payload={
+                                **(payload if isinstance(payload, dict) else {}),
                                 "blueprint_id": blueprint_id,
                                 "branch_id": branch_id,
-                                **(payload or {})
                             },
                         )
                     )
@@ -642,8 +652,6 @@ def get_asgi_app(
             headers={
                 "Cache-Control": "no-cache",
                 "Connection": "keep-alive",
-                "Access-Control-Allow-Origin": "*",
-                "Access-Control-Allow-Headers": "Cache-Control",
             },
         )
 

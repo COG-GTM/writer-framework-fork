@@ -6,7 +6,14 @@ from unittest.mock import MagicMock
 
 import pytest
 from writer.blocks.base_block import BlueprintBlock, BlueprintBlock_T
-from writer.blueprints import MAX_DAG_DEPTH, BlueprintRunManager, Graph, GraphBuilder, GraphRunner
+from writer.blueprints import (
+    MAX_DAG_DEPTH,
+    BlueprintRunManager,
+    BlueprintRunner,
+    Graph,
+    GraphBuilder,
+    GraphRunner,
+)
 from writer.core_ui import Component
 
 
@@ -725,3 +732,54 @@ class TestBranchExecution:
 #         node = graph.get_node("N1")
 #         assert node is not None
 #         assert node.outcome == "success"
+
+
+class TestRunBlueprintViaApi:
+
+    @pytest.fixture
+    def runner(self):
+        components = {
+            "bp_api": Component(id="bp_api", type="blueprints_blueprint", parentId="blueprints_root"),
+            "api_trigger": Component(id="api_trigger", type="blueprints_apitrigger", parentId="bp_api"),
+            "cron_trigger": Component(id="cron_trigger", type="blueprints_crontrigger", parentId="bp_api"),
+            "ui_trigger": Component(id="ui_trigger", type="blueprints_uieventtrigger", parentId="bp_api"),
+            "code": Component(id="code", type="blueprints_code", parentId="bp_api"),
+            "bp_other": Component(id="bp_other", type="blueprints_blueprint", parentId="blueprints_root"),
+            "other_code": Component(id="other_code", type="blueprints_code", parentId="bp_other"),
+        }
+        session = MagicMock()
+        session.session_component_tree.get_component.side_effect = components.get
+        runner = BlueprintRunner(session)
+        runner.run_branch = MagicMock(return_value="ran")
+        runner._gather_blueprints_by_trigger = lambda trigger_type: {
+            "blueprints_apitrigger": {"bp_api": "api_trigger"},
+            "blueprints_crontrigger": {"bp_api": "cron_trigger"},
+        }[trigger_type]
+        return runner
+
+    @pytest.mark.parametrize(
+        ("branch_id", "trigger_type"),
+        [(None, "API"), ("api_trigger", "API"), ("cron_trigger", "Cron")],
+    )
+    def test_runs_api_and_cron_triggers(self, runner, branch_id, trigger_type):
+        assert runner.run_blueprint_via_api("bp_api", branch_id, {}) == "ran"
+        start_node_id, _, _, title = runner.run_branch.call_args.args
+        assert start_node_id == (branch_id or "api_trigger")
+        assert title.startswith(f"{trigger_type} trigger execution")
+
+    @pytest.mark.parametrize(
+        ("blueprint_id", "branch_id"),
+        [
+            ("bp_api", "code"),
+            ("bp_api", "ui_trigger"),
+            ("bp_api", "other_code"),
+            ("bp_api", "missing"),
+            ("bp_other", "api_trigger"),
+            ("api_trigger", "api_trigger"),
+            ("missing", None),
+        ],
+    )
+    def test_rejects_non_trigger_start_blocks(self, runner, blueprint_id, branch_id):
+        with pytest.raises(ValueError):
+            runner.run_blueprint_via_api(blueprint_id, branch_id, {})
+        runner.run_branch.assert_not_called()

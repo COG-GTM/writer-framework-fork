@@ -349,6 +349,86 @@ class TestServe:
                     assert "msg" in final_payload
                     assert "finished_at" in final_payload
 
+    @pytest.mark.parametrize(
+        ("blueprint_id", "branch_id"),
+        [
+            # Code block of a blueprint without any API/Cron trigger
+            ("8ffkuce0ermsm9dr", "nrdwc9v2jn1tvu84"),
+            # Non-trigger block inside a triggerable blueprint
+            ("m4gycroojx6am4cq", "pa448833kc2pis3a"),
+            # UI event trigger is not an API entry point
+            ("m4gycroojx6am4cq", "kiwqzy0ftd62y912"),
+            # API trigger belonging to a different blueprint
+            ("m4gycroojx6am4cq", "lsoe57jb2dfbnj76"),
+        ],
+    )
+    def test_create_blueprint_job_api_rejects_non_trigger_branch(self, monkeypatch, blueprint_id, branch_id):
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "run")
+        monkeypatch.setenv("WRITER_SECRET_KEY", "abc")
+
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            with client.stream(
+                "POST", f"/private/api/blueprint/{blueprint_id}?branch_id={branch_id}",
+                json={"proposedSessionId": None},
+                headers={"Content-Type": "application/json"}
+            ) as response:
+                events = parse_sse_stream(response)
+
+        statuses = [p.get("status") for e, p in events if e == "status"]
+        assert "executing" not in statuses
+        event_type, final_payload = events[-1]
+        assert event_type == "error"
+        assert "is not an API or Cron trigger" in final_payload["msg"]
+
+    @pytest.mark.parametrize("blueprint_id", ["lsoe57jb2dfbnj76", "bb4d0e86-619e-4367-a180-be28ab6059f4", "root"])
+    def test_create_blueprint_job_api_rejects_non_blueprint_id(self, monkeypatch, blueprint_id):
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "run")
+        monkeypatch.setenv("WRITER_SECRET_KEY", "abc")
+
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            with client.stream(
+                "POST", f"/private/api/blueprint/{blueprint_id}?branch_id=lsoe57jb2dfbnj76",
+                json={"proposedSessionId": None},
+                headers={"Content-Type": "application/json"}
+            ) as response:
+                events = parse_sse_stream(response)
+
+        event_type, final_payload = events[-1]
+        assert event_type == "error"
+        assert "not found" in final_payload["msg"].lower()
+
+    def test_create_blueprint_job_api_body_cannot_override_ids(self, monkeypatch):
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "run")
+        monkeypatch.setenv("WRITER_SECRET_KEY", "abc")
+
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            with client.stream(
+                "POST", "/private/api/blueprint/8ffkuce0ermsm9dr",
+                json={"blueprint_id": "n5tm1c8il2kpzttw", "branch_id": "nrdwc9v2jn1tvu84"},
+                headers={"Content-Type": "application/json"}
+            ) as response:
+                events = parse_sse_stream(response)
+
+        event_type, final_payload = events[-1]
+        assert event_type == "artifact"
+        assert final_payload["artifact"] == "987127"
+
+    def test_create_blueprint_job_api_runs_cron_trigger_branch(self, monkeypatch):
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "run")
+        monkeypatch.setenv("WRITER_SECRET_KEY", "abc")
+
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            with client.stream(
+                "POST", "/private/api/blueprint/m4gycroojx6am4cq?branch_id=3abex827umkt4tuo",
+                json={},
+                headers={"Content-Type": "application/json"}
+            ) as response:
+                assert "access-control-allow-origin" not in response.headers
+                events = parse_sse_stream(response)
+
+        event_type, _ = events[-1]
+        assert event_type == "artifact"
+
     def test_health_endpoint_returns_ok_when_all_processes_running_run_mode(self):
         """
         Test that health endpoint returns {"status": "ok"} when all processes are running in run mode.
