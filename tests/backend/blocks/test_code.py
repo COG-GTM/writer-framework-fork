@@ -107,3 +107,15 @@ def test_code_unrelated_syntax_error_with_template_literal_is_raised(session, ru
     with pytest.raises(SyntaxError):
         block.run()
     assert block.outcome == "error"
+
+
+def test_code_payload_field_quote_breakout_is_not_executed(session, runner, fake_userapp):
+    payload = {"v": "\"; state['pwned'] = 'yes' #"}
+    component = session.add_fake_component(
+        {"code": 'x = "@{payload.v}"\nset_output(x)'}
+    )
+    block = CodeBlock(component, runner, {"payload": payload})
+    block.run()
+    assert block.outcome == "success"
+    assert block.result == "@{payload.v}"
+    assert session.session_state["pwned"] is None
