@@ -203,6 +203,9 @@ def get_asgi_app(
             return True
         if not _is_loopback_address(client_host):
             return False
+        # Requests relayed by a proxy aren't local, and forwarding headers can rewrite the peer address
+        if any(h in headers for h in ("forwarded", "x-forwarded-for", "x-real-ip")):
+            return False
         if not _is_local_host(headers.get("host")):
             return False
         if headers.get("sec-fetch-site") not in (None, "same-origin", "same-site", "none"):
@@ -1048,9 +1051,12 @@ def _is_loopback_address(address: Optional[str]) -> bool:
     if not address:
         return False
     try:
-        return ipaddress.ip_address(address).is_loopback
+        parsed_address = ipaddress.ip_address(address)
     except ValueError:
         return False
+    if isinstance(parsed_address, ipaddress.IPv6Address) and parsed_address.ipv4_mapped:
+        return parsed_address.ipv4_mapped.is_loopback
+    return parsed_address.is_loopback
 
 
 def _is_local_host(value: Optional[str]) -> bool:

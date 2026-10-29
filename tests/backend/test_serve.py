@@ -517,6 +517,30 @@ class TestEditRouteOriginCheck:
         assert res.status_code == 200
         assert len(import_calls) == 1
 
+    def test_import_accepts_ipv4_mapped_loopback_peer(self, import_calls):
+        client = self._client(peer=("::ffff:127.0.0.1", 50000))
+        res = client.post("/api/import", files=self.ZIP_FILE, headers={"Origin": self.LOCAL_URL})
+        assert res.status_code == 200
+        assert len(import_calls) == 1
+
+    def test_import_rejects_ipv4_mapped_remote_peer(self, import_calls):
+        client = self._client(peer=("::ffff:203.0.113.7", 50000))
+        res = client.post("/api/import", files=self.ZIP_FILE, headers={"Origin": self.LOCAL_URL})
+        assert res.status_code == 403
+        assert import_calls == []
+
+    @pytest.mark.parametrize("header", [
+        {"X-Forwarded-For": "127.0.0.1"},
+        {"Forwarded": "for=127.0.0.1"},
+        {"X-Real-IP": "127.0.0.1"},
+    ])
+    def test_import_rejects_proxied_requests(self, import_calls, header):
+        res = self._client().post(
+            "/api/import", files=self.ZIP_FILE, headers={"Origin": self.LOCAL_URL, **header}
+        )
+        assert res.status_code == 403
+        assert import_calls == []
+
     def test_export_rejects_remote_peer_with_forged_local_headers(self):
         client = self._client(peer=self.REMOTE_PEER)
         res = client.get("/api/export", headers={"Origin": "http://localhost", "Sec-Fetch-Site": "same-origin"})
