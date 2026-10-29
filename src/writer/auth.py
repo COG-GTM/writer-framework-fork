@@ -242,7 +242,7 @@ class Oidc(Auth):
                     response.delete_cookie("session")
                 return response
 
-        asgi_app.add_middleware(_StreamSessionGuard, is_session_allowed=self.is_session_issued)
+        asgi_app.add_middleware(_StreamSessionGuard, is_session_allowed=self.refresh_session)
 
         @asgi_app.get('/' + urlstrip(self.callback_authorize))
         async def route_callback(request: Request):
@@ -301,6 +301,15 @@ class Oidc(Auth):
             return False
         return True
 
+    def refresh_session(self, session_id: Optional[str]) -> bool:
+        """
+        Like `is_session_issued`, but slides the expiry forward so an active stream is never cut off.
+        """
+        if not self.is_session_issued(session_id):
+            return False
+        self.issued_sessions[session_id] = time.time() + self.session_max_age_seconds  # type: ignore[index]
+        return True
+
     def _issue_session(self, session_id: str) -> None:
         now = time.time()
         for expired_session_id in [sid for sid, expires_at in self.issued_sessions.items() if expires_at <= now]:
@@ -311,7 +320,7 @@ class Oidc(Auth):
 class _StreamSessionGuard:
     """
     ASGI middleware that closes `/api/stream` websockets whose session is not allowed, both at
-    `streamInit` and on every later message, so an expired login cannot keep using the stream.
+    `streamInit` and on every later message, and that refuses a later `streamInit` for another session.
     """
 
     def __init__(self, app, is_session_allowed: Callable[[Optional[str]], bool]):
@@ -330,10 +339,14 @@ class _StreamSessionGuard:
             message = await receive()
             if message["type"] != "websocket.receive":
                 return message
+            init_session_id = _stream_init_session_id(message)
+            if init_session_id is not None:
+                if session_id is not None and init_session_id != session_id:
+                    await send({"type": "websocket.close", "code": 1008})
+                    return {"type": "websocket.disconnect", "code": 1008}
+                session_id = init_session_id
             if session_id is None:
-                session_id = _stream_init_session_id(message)
-                if session_id is None:
-                    return message
+                return message
             if not self.is_session_allowed(session_id):
                 await send({"type": "websocket.close", "code": 1008})
                 return {"type": "websocket.disconnect", "code": 1008}

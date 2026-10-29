@@ -1,3 +1,5 @@
+import time
+
 import fastapi
 import fastapi.testclient
 import pytest
@@ -217,3 +219,26 @@ class TestOidcAuth:
                 with pytest.raises(fastapi.WebSocketDisconnect) as exc:
                     ws.receive_json()
                 assert exc.value.code == 1008
+
+    def test_oidc_stream_should_close_when_second_stream_init_switches_session(self):
+        asgi_app, oidc = _oidc_app()
+        other_session_id = "d" * 64
+        with fastapi.testclient.TestClient(asgi_app, base_url="https://app.example.com") as client:
+            session_id = self._issued_session(client)
+            with client.websocket_connect("/api/stream") as ws:
+                ws.send_json({"type": "streamInit", "trackingId": 0, "payload": {"sessionId": session_id}})
+                assert ws.receive_json()["echo"]["type"] == "streamInit"
+                ws.send_json({"type": "streamInit", "trackingId": 1, "payload": {"sessionId": other_session_id}})
+                with pytest.raises(fastapi.WebSocketDisconnect) as exc:
+                    ws.receive_json()
+                assert exc.value.code == 1008
+
+    def test_oidc_stream_activity_should_extend_issued_session(self):
+        asgi_app, oidc = _oidc_app()
+        with fastapi.testclient.TestClient(asgi_app, base_url="https://app.example.com") as client:
+            session_id = self._issued_session(client)
+            oidc.issued_sessions[session_id] = time.time() + 1
+            with client.websocket_connect("/api/stream") as ws:
+                ws.send_json({"type": "streamInit", "trackingId": 0, "payload": {"sessionId": session_id}})
+                assert ws.receive_json()["echo"]["type"] == "streamInit"
+            assert oidc.issued_sessions[session_id] > time.time() + oidc.session_max_age_seconds - 60
