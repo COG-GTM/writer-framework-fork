@@ -1022,7 +1022,10 @@ class AppRunner:
         if file_path == app_path or not self._is_within(file_path, app_path):
             raise PermissionError(f"{path} should be inside of application ({self.app_path})")
         wf_path = os.path.join(app_path, ".wf")
-        if self._is_within(file_path, wf_path):
+        lexical_wf_path = os.path.abspath(os.path.join(self.app_path, ".wf"))
+        if self._is_within(os.path.abspath(path), lexical_wf_path) or self._is_within(
+            file_path, os.path.realpath(wf_path)
+        ):
             raise PermissionError(f"{path} should not be inside of Writer Framework files ({wf_path})")
 
     def _load_persisted_components(self) -> Dict[str, ComponentDefinition]:

@@ -389,6 +389,21 @@ class TestAppRunnerFileContainment:
                 ar._check_file_in_app_path(str(app / "link" / "main.py"))
 
     @pytest.mark.usefixtures("setup_app_runner")
+    def test_check_file_rejects_symlinked_wf_directory(self, setup_app_runner, tmp_path) -> None:
+        app = tmp_path / "app"
+        (app / "wfdata").mkdir(parents=True)
+        (app / "wfdata" / "metadata.json").write_text("{}")
+        (app / ".wf").symlink_to(app / "wfdata", target_is_directory=True)
+        (app / "wflink").symlink_to(app / ".wf", target_is_directory=True)
+        with setup_app_runner(str(app), "edit") as ar:
+            with pytest.raises(PermissionError):
+                ar._check_file_in_app_path(str(app / ".wf" / "metadata.json"))
+            with pytest.raises(PermissionError):
+                ar._check_file_in_app_path(str(app / "wfdata" / "metadata.json"))
+            with pytest.raises(PermissionError):
+                ar._check_file_in_app_path(str(app / "wflink" / "metadata.json"))
+
+    @pytest.mark.usefixtures("setup_app_runner")
     def test_file_operations_reject_sibling_directory(self, setup_app_runner, app_layout) -> None:
         app, sibling = app_layout
         with setup_app_runner(str(app), "edit") as ar:
