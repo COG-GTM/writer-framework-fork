@@ -361,6 +361,8 @@ def get_asgi_app(
                 cookies=dict(request.cookies),
                 headers=dict(request.headers),
                 proposedSessionId=initBody.proposedSessionId,
+                # A session cookie only resumes a session created by the auth callback; it never creates one.
+                requireExistingSession=session_id is not None,
                 additionalMail=custom_server_setup_mail,
             )
         )
