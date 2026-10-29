@@ -1,11 +1,33 @@
 import logging
 import os
 from functools import partial
-from typing import Any, Dict, List, Literal, Optional, Protocol
+from typing import Any, Dict, List, Literal, Mapping, Optional, Protocol, Tuple
 
 import httpx
 
 logger = logging.getLogger("kv_storage")
+
+TRUST_TENANT_HEADERS_ENV = "WRITER_TRUST_TENANT_HEADERS"
+
+
+def trust_tenant_headers() -> bool:
+    """
+    Tenant headers (x-agent-id / x-organization-id) are client-controlled
+    unless a trusted proxy sets or strips them, so they are only honoured
+    when the deployment explicitly opts in.
+    """
+    return os.getenv(TRUST_TENANT_HEADERS_ENV, "").strip().lower() in ("1", "true", "yes")
+
+
+def resolve_tenant_ids(headers: Optional[Mapping[str, Any]]) -> Tuple[Optional[str], Optional[str]]:
+    """Returns (agent_id, org_id) for the given session headers."""
+    env_agent_id = os.getenv("WRITER_APP_ID")
+    env_org_id = os.getenv("WRITER_ORG_ID")
+    if not headers or not trust_tenant_headers():
+        return (env_agent_id, env_org_id)
+    agent_id = headers.get("x-agent-id") or env_agent_id
+    org_id = headers.get("x-organization-id") or env_org_id
+    return (agent_id, org_id)
 
 
 class _WrappedRequestFunc(Protocol):
@@ -26,19 +48,11 @@ class KeyValueStorage:
 
         self._client = client if client is not None else httpx
 
-    def _get_agent_ids(self):
+    def get_agent_ids(self) -> Tuple[Optional[str], Optional[str]]:
         from writer.core import get_session
         current_session = get_session()
-
-        if current_session:
-            headers = current_session.headers or {}
-            agent_id = headers.get("x-agent-id") or os.getenv("WRITER_APP_ID")
-            org_id = headers.get("x-organization-id") or os.getenv("WRITER_ORG_ID")
-            return (agent_id, org_id)
-
-        agent_id = os.getenv("WRITER_APP_ID")
-        org_id = os.getenv("WRITER_ORG_ID")
-        return (agent_id, org_id)
+        headers = current_session.headers if current_session else None
+        return resolve_tenant_ids(headers)
 
     def get(self, key: str, type_: Literal["data", "secret"]) -> Dict[str, Any]:
         return self._request(partial(self._client.get, url=f"{self.api_url}/agent_{type_}/{key}")).json()
@@ -66,8 +80,8 @@ class KeyValueStorage:
 
     def _request(self, request_func: _WrappedRequestFunc) -> httpx.Response:
 
-        agent_id, org_id = self._get_agent_ids()
-        if None in (agent_id, org_id):
+        agent_id, org_id = self.get_agent_ids()
+        if agent_id is None or org_id is None:
             raise ValueError("Can't access KV storage. Missing agent id or org id")
 
         if None in (self.api_key, self.api_url):
@@ -84,7 +98,7 @@ class KeyValueStorage:
         return response
 
     def is_accessible(self) -> bool:
-        if None in self._get_agent_ids():
+        if None in self.get_agent_ids():
             return False
         if None in (self.api_key, self.api_url):
             return False
