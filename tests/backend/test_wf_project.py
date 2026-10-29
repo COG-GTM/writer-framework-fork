@@ -2,8 +2,11 @@ import io
 import os
 import shutil
 import tempfile
+import time
 from typing import List
 from unittest.mock import ANY
+
+import pytest
 
 from writer import VERSION, core_ui, wf_project
 from writer.ss_types import ComponentDefinition
@@ -187,3 +190,77 @@ def test_wf_project_can_create_project_on_empty_directory():
         # Then
         assert is_wf_project is False
         assert can_create_wf_project is True
+
+
+def _components_with_page_id(page_id) -> dict:
+    components_root: List[ComponentDefinition] = load_fixture_content('components/components-root.jsonl')
+    components = {c['id']: c for c in components_root}
+    components[page_id] = {
+        "id": page_id,
+        "type": "page",
+        "content": {},
+        "isCodeManaged": False,
+        "position": 0,
+        "parentId": "root",
+    }
+    return components
+
+
+@pytest.mark.parametrize("page_id", ["x/y", "../../outside", "..", "a\\b", "", "page id", "a\x00b", 42, None])
+def test_wf_project_validate_component_ids_rejects_unsafe_page_ids(page_id):
+    with pytest.raises(wf_project.InvalidComponentIdError):
+        wf_project.validate_component_ids({"p": {"id": page_id, "type": "page"}})
+
+
+@pytest.mark.parametrize("component_type", ["page", "blueprints_blueprint"])
+def test_wf_project_validate_component_ids_rejects_unsafe_ids_for_file_roots(component_type):
+    with pytest.raises(wf_project.InvalidComponentIdError):
+        wf_project.validate_component_ids({"x/y": {"id": "x/y", "type": component_type}})
+
+
+def test_wf_project_validate_component_ids_accepts_framework_ids():
+    _, components = wf_project.read_files(test_app_dir)
+
+    wf_project.validate_component_ids(components)
+    wf_project.validate_component_ids({
+        "bb4d0e86-619e-4367-a180-be28ab6059f4": {"id": "bb4d0e86-619e-4367-a180-be28ab6059f4", "type": "page"},
+        "nyo5vc79sb031yz8": {"id": "nyo5vc79sb031yz8", "type": "blueprints_blueprint"},
+        "x/y": {"id": "x/y", "type": "text"},
+    })
+
+
+def test_wf_project_write_files_rejects_page_id_with_path_separator():
+    with tempfile.TemporaryDirectory('test_wf_project_write_files') as tmp_app_dir:
+        with pytest.raises(wf_project.InvalidComponentIdError):
+            wf_project.write_files(
+                tmp_app_dir,
+                metadata={'writer_version': '0.1.0'},
+                components=_components_with_page_id("x/y"),
+                context=wf_project.WfProjectContext(app_path=tmp_app_dir)
+            )
+
+        assert not any("x" in f.split("components-page-0-")[-1] for f in os.listdir(os.path.join(tmp_app_dir, '.wf')))
+
+
+def test_wf_project_saver_process_survives_invalid_component_id():
+    with tempfile.TemporaryDirectory('test_wf_project_saver') as tmp_app_dir:
+        context = wf_project.WfProjectContext(app_path=tmp_app_dir)
+        wf_project.start_process_write_files_async(context, 0.05)
+        try:
+            context.write_files_async_queue.put((tmp_app_dir, {'writer_version': '0.1.0'}, _components_with_page_id("x/y")))
+            deadline = time.time() + 5
+            while not context.write_files_async_queue.empty() and time.time() < deadline:
+                time.sleep(0.05)
+            time.sleep(0.3)
+            assert context.write_files_async_process.is_alive()
+
+            wf_project.write_files_async(context, {'writer_version': '0.1.0'}, _components_with_page_id("valid-page_1"))
+            expected = os.path.join(tmp_app_dir, '.wf', 'components-page-0-valid-page_1.jsonl')
+            deadline = time.time() + 5
+            while not os.path.isfile(expected) and time.time() < deadline:
+                time.sleep(0.05)
+
+            assert os.path.isfile(expected)
+            assert context.write_files_async_process.is_alive()
+        finally:
+            wf_project.shutdown_process_write_files_async(context)

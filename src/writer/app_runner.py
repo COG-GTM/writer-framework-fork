@@ -1066,6 +1066,7 @@ class AppRunner:
     ) -> AppProcessServerResponse:
         if self.mode != "edit":
             raise PermissionError("Cannot update components in non-update mode.")
+        wf_project.validate_component_ids(payload.components)
         self.bmc_components = payload.components
 
         wf_project.write_files_async(
@@ -1211,7 +1212,8 @@ class AppRunner:
                     raise ValueError(".wf directory not found alongside main.py in the archive.")
 
                 # Parse files to ensure there are no errors
-                wf_project.read_files(main_py_dir)
+                _, imported_components = wf_project.read_files(main_py_dir)
+                wf_project.validate_component_ids(imported_components)
 
                 # Passed all checks; replace current app contents
 

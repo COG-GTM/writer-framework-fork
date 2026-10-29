@@ -14,6 +14,7 @@ import logging
 import multiprocessing
 import os
 import queue
+import re
 import time
 import typing
 from collections import OrderedDict
@@ -25,6 +26,7 @@ from writer.ss_types import ComponentDefinition, MetadataDefinition, SourceFiles
 
 ROOTS = ['root', 'blueprints_root']
 COMPONENT_ROOTS = ['page', 'blueprints_blueprint']
+COMPONENT_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
 
 shared_queue_write_files: typing.Optional[Queue] = None
 
@@ -35,6 +37,28 @@ class WfProjectContext:
     write_files_async_process: typing.Optional[multiprocessing.Process] = None
     write_files_async_stop: Any = dataclasses.field(default_factory=multiprocessing.Event)  # Note: Event is a function, not a class in python, it can't be typed
     file_hashes: Dict[str, str] = dataclasses.field(default_factory=dict)
+
+
+class InvalidComponentIdError(ValueError):
+    pass
+
+
+def validate_component_ids(components: Dict[str, ComponentDefinition]) -> None:
+    """
+    Ensures that the ids of the components stored in their own `.wf` file
+    (pages and blueprints) are safe to embed in a file name.
+
+    >>> wf_project.validate_component_ids(components)
+    """
+    for c in components.values():
+        if not isinstance(c, dict) or c.get("type") not in COMPONENT_ROOTS:
+            continue
+        component_id = c.get("id")
+        if not isinstance(component_id, str) or not COMPONENT_ID_PATTERN.fullmatch(component_id):
+            raise InvalidComponentIdError(
+                f"Invalid {c.get('type')} component id {component_id!r}. "
+                "Only letters, digits, '_' and '-' are allowed."
+            )
 
 
 def write_files_async(context: WfProjectContext, metadata: MetadataDefinition, components: Dict[str, ComponentDefinition]) -> None:
@@ -180,6 +204,7 @@ def _expected_component_fileinfos(components: dict[str, ComponentDefinition]) ->
     >>> for component_id, filename in component_files:
     >>>     print(f"Components that depends on {component_id} will be written in {filename}")
     """
+    validate_component_ids(components)
     expected_component_files = []
     for component_file_root in COMPONENT_ROOTS:
         position = 0
@@ -313,7 +338,11 @@ def _start_process_write_files_async_process(context: WfProjectContext, save_int
 
         if obj is not None:
             app_path, metadata, components = obj
-            write_files(app_path, metadata, components, context)
+            try:
+                write_files(app_path, metadata, components, context)
+            except Exception:
+                logging.getLogger("writer").exception("Couldn't save project files.")
+                context.file_hashes.clear()
 
         time.sleep(save_interval)
 

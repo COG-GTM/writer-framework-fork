@@ -1,9 +1,14 @@
 import asyncio
+import os
+import shutil
 import threading
+import zipfile
 
 import pytest
+from writer import wf_project
 from writer.app_runner import AppRunner
 from writer.ss_types import (
+    ComponentUpdateRequestPayload,
     EventRequest,
     InitSessionRequest,
     InitSessionRequestPayload,
@@ -345,3 +350,38 @@ class TestAppRunner:
 
             # Then
             assert res.payload.result["result"] is not None
+
+
+class TestAppRunnerComponentIdValidation:
+    def test_update_components_rejects_page_id_with_path_separator(self, setup_app_runner) -> None:
+        components = {
+            "root": {"id": "root", "type": "root", "content": {}, "position": 0, "parentId": None},
+            "x/y": {"id": "x/y", "type": "page", "content": {}, "position": 0, "parentId": "root"},
+        }
+        with setup_app_runner(test_app_dir, "edit") as ar:
+            previous_components = ar.bmc_components
+            with pytest.raises(wf_project.InvalidComponentIdError):
+                asyncio.run(
+                    ar.update_components(
+                        "session", ComponentUpdateRequestPayload(components=components)
+                    )
+                )
+            assert ar.bmc_components is previous_components
+            assert ar.wf_project_context.write_files_async_queue.empty()
+
+    def test_import_zip_rejects_page_id_with_path_separator(self, setup_app_runner, tmp_path) -> None:
+        archive = tmp_path / "crafted.zip"
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr("main.py", "")
+            zf.writestr(".wf/metadata.json", '{"writer_version": "0.0.0"}')
+            zf.writestr(
+                ".wf/components-page-0-evil.jsonl",
+                '{"id": "x/y", "type": "page", "content": {}, "position": 0, "parentId": "root"}\n',
+            )
+        app_dir = tmp_path / "app"
+        shutil.copytree(test_app_dir, app_dir)
+        page_files = sorted(os.listdir(app_dir / ".wf"))
+        with setup_app_runner(str(app_dir), "edit") as ar:
+            with pytest.raises(ValueError):
+                asyncio.run(ar.import_zip(str(archive)))
+        assert sorted(os.listdir(app_dir / ".wf")) == page_files
