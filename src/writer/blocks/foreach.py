@@ -1,6 +1,31 @@
+import os
+
 from writer.abstract import register_abstract_template
 from writer.blocks.base_block import BlueprintBlock
-from writer.ss_types import AbstractTemplate
+from writer.ss_types import AbstractTemplate, WriterConfigurationError
+
+DEFAULT_MAX_ITEMS = 1000
+DEFAULT_MAX_TOTAL_ITERATIONS = 10000
+FANOUT_ENV_KEY = "foreach_fanout"
+
+
+def _limit_from_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def max_items() -> int:
+    return _limit_from_env("WRITER_FOREACH_MAX_ITEMS", DEFAULT_MAX_ITEMS)
+
+
+def max_total_iterations() -> int:
+    return _limit_from_env("WRITER_FOREACH_MAX_TOTAL_ITERATIONS", DEFAULT_MAX_TOTAL_ITERATIONS)
 
 
 class ForEach(BlueprintBlock):
@@ -18,7 +43,7 @@ class ForEach(BlueprintBlock):
                     "fields": {
                         "items": {
                             "name": "Items",
-                            "desc": "The item value will be passed in the execution environment. It will be available at @{item}, and its ID at @{itemId}. You can use either a list or a dictionary.",
+                            "desc": "The item value will be passed in the execution environment. It will be available at @{item}, and its ID at @{itemId}. You can use either a list or a dictionary. At most 1000 items are allowed by default (WRITER_FOREACH_MAX_ITEMS).",
                             "default": "[]",
                             "init": '["France", "Poland"]',
                             "type": "Object",
@@ -62,6 +87,9 @@ class ForEach(BlueprintBlock):
             if not isinstance(items, (list, dict)):
                 raise ValueError("Items must be a list or dictionary.")
 
+            fanout = self._check_limits(len(items), base_execution_environment)
+            base_execution_environment = base_execution_environment | {FANOUT_ENV_KEY: fanout}
+
             if isinstance(items, list):
                 blueprint_environments = [
                     base_execution_environment | {f"{prefix}itemId": i, f"{prefix}item": item}
@@ -90,3 +118,24 @@ class ForEach(BlueprintBlock):
         except BaseException as e:
             self.outcome = "error"
             raise e
+
+    def _check_limits(self, item_count: int, execution_environment: dict) -> int:
+        limit = max_items()
+        if item_count > limit:
+            raise WriterConfigurationError(
+                f"For-each loop received {item_count} items, which exceeds the maximum of "
+                f"{limit}. Reduce the number of items or raise WRITER_FOREACH_MAX_ITEMS."
+            )
+
+        parent_fanout = execution_environment.get(FANOUT_ENV_KEY, 1)
+        if not isinstance(parent_fanout, int) or isinstance(parent_fanout, bool) or parent_fanout < 1:
+            parent_fanout = 1
+        fanout = parent_fanout * max(item_count, 1)
+        total_limit = max_total_iterations()
+        if fanout > total_limit:
+            raise WriterConfigurationError(
+                f"Nested for-each loops would run {fanout} iterations, which exceeds the maximum "
+                f"of {total_limit}. Reduce the number of items or raise "
+                "WRITER_FOREACH_MAX_TOTAL_ITERATIONS."
+            )
+        return fanout
