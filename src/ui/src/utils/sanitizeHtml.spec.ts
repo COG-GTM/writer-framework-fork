@@ -50,6 +50,12 @@ describe("sanitizeHtml", () => {
 	it.each([
 		"javascript:alert(1)",
 		"JaVaScRiPt:alert(1)",
+		"java\tscript:alert(1)",
+		" javascript:alert(1)",
+		"\u0001javascript:alert(1)",
+		"javascript&#58;alert(1)",
+		"javascript&colon;alert(1)",
+		"javascript&#x09;:alert(1)",
 		"vbscript:msgbox(1)",
 		"data:text/html,<script>alert(1)</script>",
 		"//evil.test/x",
@@ -58,6 +64,16 @@ describe("sanitizeHtml", () => {
 	])("drops dangerous link protocol %s", (href) => {
 		const html = sanitize(`<a href="${href}">x</a>`);
 		expect(html).toBe("<a>x</a>");
+	});
+
+	it.each([
+		"javascript:alert(1)",
+		"javascript&#58;alert(1)",
+		"vbscript:msgbox(1)",
+		"//evil.test/x",
+	])("drops dangerous markdown link target %s", (href) => {
+		const html = renderMarkdown(`[x](${href})`);
+		expect(html).not.toMatch(/href/i);
 	});
 
 	it.each([
