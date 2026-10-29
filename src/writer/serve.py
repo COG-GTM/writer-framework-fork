@@ -78,6 +78,8 @@ BLUEPRINT_API_EXECUTION_TIMEOUT_SECONDS = int(os.getenv("AGENT_BUILDER_BLUEPRINT
 BLUEPRINT_API_RETRY_TIMEOUT = int(os.getenv("AGENT_BUILDER_BLUEPRINT_API_RETRY_TIMEOUT", "10000"))
 AUTOGEN_RATE_LIMIT_MAX_REQUESTS = int(os.getenv("WRITER_AUTOGEN_RATE_LIMIT_MAX_REQUESTS", "5"))
 AUTOGEN_RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("WRITER_AUTOGEN_RATE_LIMIT_WINDOW_SECONDS", "300"))
+# Only enable behind a proxy that strips client-supplied x-agent-token and injects a verified one.
+AUTOGEN_TRUST_AGENT_TOKEN_HEADER = os.getenv("WRITER_AUTOGEN_TRUST_AGENT_TOKEN_HEADER", "").lower() in ("1", "true", "yes")
 
 
 class WriterState(typing.Protocol):
@@ -343,7 +345,7 @@ def get_asgi_app(
             raise RequestValidationError(e.errors()) from e
 
         import writer.autogen
-        agent_token_header = request.headers.get('x-agent-token')
+        agent_token_header = request.headers.get("x-agent-token") if AUTOGEN_TRUST_AGENT_TOKEN_HEADER else None
 
         _reserve_autogen_slot(session_id)
         # The slot is held until the worker thread finishes, even if the client disconnects.

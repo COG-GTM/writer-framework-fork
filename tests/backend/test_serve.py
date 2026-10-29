@@ -518,13 +518,59 @@ class TestAutogen:
         asgi_app = writer.serve.get_asgi_app(test_app_dir, "edit")
         with fastapi.testclient.TestClient(asgi_app) as client:
             session_id = self._init_session(client)
-            res = self._autogen(client, session_id, **{"X-Agent-Token": "agent-token"})
+            res = self._autogen(client, session_id)
             assert res.status_code == 200
             assert res.json() == {"blueprint": {"components": []}, "messages": []}
         assert len(calls) == 1
         assert calls[0]["description"] == "Build a chatbot"
-        assert calls[0]["token_header"] == "agent-token"
         assert calls[0]["thread"] is not threading.main_thread()
+
+    def test_client_supplied_agent_token_is_not_forwarded_by_default(self, fake_generate):
+        _, calls = fake_generate
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "edit")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            session_id = self._init_session(client)
+            res = self._autogen(client, session_id, **{"X-Agent-Token": "forged-token"})
+            assert res.status_code == 200
+        assert len(calls) == 1
+        assert calls[0]["token_header"] is None
+
+    def test_agent_token_forwarded_only_when_proxy_header_is_trusted(self, fake_generate, monkeypatch):
+        _, calls = fake_generate
+        monkeypatch.setattr(writer.serve, "AUTOGEN_TRUST_AGENT_TOKEN_HEADER", True)
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "edit")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            session_id = self._init_session(client)
+            res = self._autogen(client, session_id, **{"X-Agent-Token": "proxy-token"})
+            assert res.status_code == 200
+        assert calls[0]["token_header"] == "proxy-token"
+
+    def test_run_mode_rejects_before_any_model_call(self, monkeypatch):
+        import sys
+        import types
+
+        model_calls = []
+
+        class FakeChat:
+            def chat(self, **kwargs):
+                model_calls.append(kwargs)
+                raise AssertionError("model must not be called")
+
+        fake_writerai = types.ModuleType("writerai")
+        fake_writerai.Writer = lambda *a, **k: types.SimpleNamespace(chat=FakeChat())  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "writerai", fake_writerai)
+        monkeypatch.delitem(sys.modules, "writer.autogen", raising=False)
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "run")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            for headers in (
+                {},
+                {"Origin": self.LOCAL_ORIGIN, "X-Agent-Token": "forged-token"},
+                {"Origin": self.LOCAL_ORIGIN, "X-Session-Id": "anything"},
+            ):
+                res = client.post("/api/autogen", json={"description": "Build a chatbot"}, headers=headers)
+                assert res.status_code == 403
+        assert model_calls == []
+        assert "writer.autogen" not in sys.modules
 
     def test_rate_limited_per_session(self, fake_generate, monkeypatch):
         monkeypatch.setattr(writer.serve, "AUTOGEN_RATE_LIMIT_MAX_REQUESTS", 2)
