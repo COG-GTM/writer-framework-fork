@@ -100,6 +100,12 @@ class TestAuth:
             res = client.get("/protected", headers={"Authorization": header})
             assert res.status_code == 401
 
+    def test_basicauth_should_accept_extra_spaces_after_scheme(self):
+        app = _basicauth_app()
+        with fastapi.testclient.TestClient(app) as client:
+            res = client.get("/protected", headers={"Authorization": "Basic   YWRtaW46czNjcmV0"})
+            assert res.status_code == 200
+
     def test_basicauth_should_reject_everyone_when_password_is_not_configured(self):
         app = fastapi.FastAPI()
         app.get("/protected")(lambda: {"ok": True})

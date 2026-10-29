@@ -172,7 +172,7 @@ class BasicAuth(Auth):
 
 def _decode_basic_credentials(data: str) -> Tuple[str, str]:
     try:
-        username, password = base64.b64decode(data, validate=True).decode().split(':', 1)
+        username, password = base64.b64decode(data.strip(' '), validate=True).decode().split(':', 1)
     except (binascii.Error, UnicodeDecodeError, ValueError):
         raise Unauthorized()
     return username, password
