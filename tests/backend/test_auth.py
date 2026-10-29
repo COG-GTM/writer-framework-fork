@@ -255,6 +255,18 @@ class TestOidcLoginState:
             assert "session" not in res.cookies
             assert idp.token_requests == []
 
+    @pytest.mark.parametrize("state", ["bad%3Bstate", "bad%20state", "x" * 200])
+    def test_callback_should_reject_malformed_state(self, idp, state):
+        client, _ = _oidc_client()
+        with client:
+            _start_login(client)
+
+            res = client.get(f"/authorize?code=attacker-code&state={state}", follow_redirects=False)
+
+            assert res.status_code == 400
+            assert "session" not in res.cookies
+            assert idp.token_requests == []
+
     def test_callback_should_reject_code_refused_by_identity_provider(self, idp):
         idp.token_response = {"error": "invalid_grant"}
         client, _ = _oidc_client()

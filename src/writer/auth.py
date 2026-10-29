@@ -2,6 +2,7 @@ import asyncio
 import dataclasses
 import logging
 import os.path
+import re
 import secrets
 import time
 from abc import ABCMeta, abstractmethod
@@ -183,6 +184,7 @@ class Oidc(Auth):
     login_state_max_age_seconds: int = 600
 
     LOGIN_COOKIE_PREFIX = "oidc_login_"
+    LOGIN_STATE_PATTERN = re.compile(r"[A-Za-z0-9_-]{43}")
 
     authlib: OAuth2Session = None
     callback_func: Optional[Callable[[Request, str, dict], None]] = None # Callback to validate user authentication
@@ -269,6 +271,8 @@ class Oidc(Auth):
         @asgi_app.get('/' + urlstrip(self.callback_authorize))
         async def route_callback(request: Request):
             state = request.query_params.get("state")
+            if state is not None and not self.LOGIN_STATE_PATTERN.fullmatch(state):
+                state = None
             try:
                 code_verifier = request.cookies.get(self.LOGIN_COOKIE_PREFIX + state) if state else None
                 if not code_verifier:
