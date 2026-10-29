@@ -78,6 +78,8 @@ BLUEPRINT_API_EXECUTION_TIMEOUT_SECONDS = int(os.getenv("AGENT_BUILDER_BLUEPRINT
 BLUEPRINT_API_RETRY_TIMEOUT = int(os.getenv("AGENT_BUILDER_BLUEPRINT_API_RETRY_TIMEOUT", "10000"))
 AUTOGEN_RATE_LIMIT_MAX_REQUESTS = int(os.getenv("WRITER_AUTOGEN_RATE_LIMIT_MAX_REQUESTS", "5"))
 AUTOGEN_RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("WRITER_AUTOGEN_RATE_LIMIT_WINDOW_SECONDS", "300"))
+# Server-wide cap, so minting fresh sessions (e.g. with --enable-remote-edit) cannot reset the quota.
+AUTOGEN_GLOBAL_RATE_LIMIT_MAX_REQUESTS = int(os.getenv("WRITER_AUTOGEN_GLOBAL_RATE_LIMIT_MAX_REQUESTS", "30"))
 # Only enable behind a proxy that strips client-supplied x-agent-token and injects a verified one.
 AUTOGEN_TRUST_AGENT_TOKEN_HEADER = os.getenv("WRITER_AUTOGEN_TRUST_AGENT_TOKEN_HEADER", "").lower() in ("1", "true", "yes")
 
@@ -302,8 +304,11 @@ def get_asgi_app(
 
     autogen_in_flight: Set[str] = set()
     autogen_history: Dict[str, Deque[float]] = {}
+    autogen_global_history: Deque[float] = deque()
 
     def _prune_autogen_history(now: float) -> None:
+        while autogen_global_history and now - autogen_global_history[0] >= AUTOGEN_RATE_LIMIT_WINDOW_SECONDS:
+            autogen_global_history.popleft()
         for sid in list(autogen_history):
             history = autogen_history[sid]
             while history and now - history[0] >= AUTOGEN_RATE_LIMIT_WINDOW_SECONDS:
@@ -324,7 +329,10 @@ def get_asgi_app(
         history = autogen_history.setdefault(session_id, deque())
         if len(history) >= AUTOGEN_RATE_LIMIT_MAX_REQUESTS:
             raise HTTPException(status_code=429, detail="Too many autogen requests. Try again later.")
+        if len(autogen_global_history) >= AUTOGEN_GLOBAL_RATE_LIMIT_MAX_REQUESTS:
+            raise HTTPException(status_code=429, detail="Too many autogen requests. Try again later.")
         history.append(now)
+        autogen_global_history.append(now)
         autogen_in_flight.add(session_id)
 
     @app.post("/api/autogen")

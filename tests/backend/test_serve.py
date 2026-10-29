@@ -585,6 +585,16 @@ class TestAutogen:
             assert self._autogen(client, other_session_id).status_code == 200
         assert len(calls) == 3
 
+    def test_fresh_sessions_cannot_reset_the_global_limit(self, fake_generate, monkeypatch):
+        _, calls = fake_generate
+        monkeypatch.setattr(writer.serve, "AUTOGEN_RATE_LIMIT_MAX_REQUESTS", 5)
+        monkeypatch.setattr(writer.serve, "AUTOGEN_GLOBAL_RATE_LIMIT_MAX_REQUESTS", 3)
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "edit")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            statuses = [self._autogen(client, self._init_session(client)).status_code for _ in range(5)]
+        assert statuses == [200, 200, 200, 429, 429]
+        assert len(calls) == 3
+
     def test_concurrent_request_rejected_while_server_stays_responsive(self, fake_generate):
         import threading
 

@@ -147,7 +147,7 @@ async function handleAutogen() {
 		return;
 	}
 
-	if (description.length > AUTOGEN_MAX_DESCRIPTION_LENGTH) {
+	if ([...description].length > AUTOGEN_MAX_DESCRIPTION_LENGTH) {
 		errorMessage.value = `Instructions are too long. Keep them under ${AUTOGEN_MAX_DESCRIPTION_LENGTH} characters.`;
 		return;
 	}
