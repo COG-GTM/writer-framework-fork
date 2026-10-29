@@ -21,7 +21,7 @@ logger = logging.getLogger("journal")
 JOURNAL_KEY_PREFIX = "wf-journal-"
 INIT_LOGS_KEY_PREFIX = "wf-init-logs-"
 _BUILDER_DATA_KEY_PATTERN = re.compile(
-    rf"(?:{re.escape(JOURNAL_KEY_PREFIX)}|{re.escape(INIT_LOGS_KEY_PREFIX)})[A-Za-z0-9_-]+"
+    rf"(?:{re.escape(JOURNAL_KEY_PREFIX)}|{re.escape(INIT_LOGS_KEY_PREFIX)})[ea]-[0-9]{{1,16}}"
 )
 
 

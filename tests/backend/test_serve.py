@@ -416,9 +416,10 @@ class TestBuilderDataRoutes:
         from writer.keyvalue_storage import writer_kv_storage
 
         store = {
-            "wf-journal-u-1700000000000": {"data": {"blockOutputs": {"b1": "secret output"}}},
-            "wf-init-logs-u-1700000000001": {"data": {"logs": []}},
+            "wf-journal-a-1700000000000": {"data": {"blockOutputs": {"b1": "secret output"}}},
+            "wf-init-logs-e-1700000000001": {"data": {"logs": []}},
             "customer-records": {"data": {"ssn": "123-45-6789"}},
+            "wf-journal-customer-records": {"data": {"ssn": "987-65-4321"}},
         }
         calls: dict = {"keys": 0, "get": [], "delete": []}
 
@@ -457,7 +458,7 @@ class TestBuilderDataRoutes:
             headers = {"X-Writer-Session-Id": session_id}
             assert client.post("/api/data/retrieve", json={}, headers=headers).status_code == 404
             assert client.post(
-                "/api/data/delete", json={"keys": ["wf-journal-u-1700000000000"]}, headers=headers
+                "/api/data/delete", json={"keys": ["wf-journal-a-1700000000000"]}, headers=headers
             ).status_code == 404
         assert calls == {"keys": 0, "get": [], "delete": []}
 
@@ -471,7 +472,7 @@ class TestBuilderDataRoutes:
         with fastapi.testclient.TestClient(asgi_app) as client:
             assert client.post("/api/data/retrieve", json={}, headers=headers).status_code == 401
             assert client.post(
-                "/api/data/delete", json={"keys": ["wf-journal-u-1700000000000"]}, headers=headers
+                "/api/data/delete", json={"keys": ["wf-journal-a-1700000000000"]}, headers=headers
             ).status_code == 401
         assert calls == {"keys": 0, "get": [], "delete": []}
 
@@ -486,7 +487,7 @@ class TestBuilderDataRoutes:
                 headers["Origin"] = origin
             assert client.post("/api/data/retrieve", json={}, headers=headers).status_code == 403
             assert client.post(
-                "/api/data/delete", json={"keys": ["wf-journal-u-1700000000000"]}, headers=headers
+                "/api/data/delete", json={"keys": ["wf-journal-a-1700000000000"]}, headers=headers
             ).status_code == 403
         assert calls == {"keys": 0, "get": [], "delete": []}
 
@@ -498,12 +499,13 @@ class TestBuilderDataRoutes:
             headers = {**self.LOCAL_ORIGIN, "X-Writer-Session-Id": session_id}
             res = client.post("/api/data/retrieve", json={}, headers=headers)
             assert res.status_code == 200
-            assert set(res.json()["result"]) == {"wf-journal-u-1700000000000", "wf-init-logs-u-1700000000001"}
+            assert set(res.json()["result"]) == {"wf-journal-a-1700000000000", "wf-init-logs-e-1700000000001"}
 
             res = client.post("/api/data/retrieve", json={"key_contains": "customer"}, headers=headers)
             assert res.status_code == 200
             assert res.json()["result"] == {}
         assert "customer-records" not in calls["get"]
+        assert "wf-journal-customer-records" not in calls["get"]
 
     def test_delete_is_scoped_to_execution_history(self, kv_storage) -> None:
         store, calls = kv_storage
@@ -511,12 +513,17 @@ class TestBuilderDataRoutes:
         with fastapi.testclient.TestClient(asgi_app) as client:
             session_id = self._init_session(client)
             headers = {**self.LOCAL_ORIGIN, "X-Writer-Session-Id": session_id}
-            for bad_keys in (["customer-records"], ["wf-journal-u-1", "customer-records"], ["wf-journal-../x"]):
+            for bad_keys in (
+                ["customer-records"],
+                ["wf-journal-a-1", "customer-records"],
+                ["wf-journal-customer-records"],
+                ["wf-journal-../x"],
+            ):
                 res = client.post("/api/data/delete", json={"keys": bad_keys}, headers=headers)
                 assert res.status_code == 400
             assert calls["delete"] == []
 
-            res = client.post("/api/data/delete", json={"keys": ["wf-journal-u-1700000000000"]}, headers=headers)
+            res = client.post("/api/data/delete", json={"keys": ["wf-journal-a-1700000000000"]}, headers=headers)
             assert res.status_code == 200
-        assert calls["delete"] == ["wf-journal-u-1700000000000"]
+        assert calls["delete"] == ["wf-journal-a-1700000000000"]
         assert "customer-records" in store
