@@ -108,11 +108,16 @@ def _oidc_app(callback=None):
     asgi_app.state.app_runner = _FakeAppRunner()
 
     asgi_app.state.reject_init = False
+    asgi_app.state.reject_origin = False
 
     @asgi_app.post("/api/init")
     async def init():
+        if asgi_app.state.reject_origin:
+            raise fastapi.HTTPException(status_code=403, detail="Incorrect origin.")
         if asgi_app.state.reject_init:
-            raise fastapi.HTTPException(status_code=403, detail="Session rejected.")
+            raise fastapi.HTTPException(
+                status_code=403, detail="Session rejected.", headers={writer.serve.SESSION_REJECTED_HEADER: "1"}
+            )
         return {"ok": True}
 
     @asgi_app.websocket("/api/stream")
@@ -209,6 +214,20 @@ class TestOidcAuth:
             res = client.get("/", follow_redirects=False)
             assert res.status_code == 307
             assert res.headers["location"].startswith("https://idp.example.com/authorize")
+
+    def test_oidc_should_keep_login_when_init_is_rejected_for_another_reason(self):
+        asgi_app, oidc = _oidc_app()
+        with fastapi.testclient.TestClient(asgi_app, base_url="https://app.example.com") as client:
+            session_id = self._issued_session(client)
+            client.cookies.set("session", session_id)
+            asgi_app.state.reject_origin = True
+            res = client.post("/api/init", follow_redirects=False)
+            assert res.status_code == 403
+            assert oidc.is_session_issued(session_id)
+
+            asgi_app.state.reject_origin = False
+            res = client.post("/api/init", follow_redirects=False)
+            assert res.status_code == 200
 
     def _issued_session(self, client) -> str:
         res = client.get("/authorize?code=abc&state=xyz", follow_redirects=False)

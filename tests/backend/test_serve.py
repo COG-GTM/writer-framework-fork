@@ -41,6 +41,7 @@ class TestServe:
             client.cookies.set("session", "a" * 64)
             res = client.post("/api/init", json={"proposedSessionId": None})
             assert res.status_code == 403
+            assert writer.serve.SESSION_REJECTED_HEADER in res.headers
 
             with client.websocket_connect("/api/stream") as websocket:
                 websocket.send_json({"type": "streamInit", "trackingId": 0, "payload": {"sessionId": "a" * 64}})

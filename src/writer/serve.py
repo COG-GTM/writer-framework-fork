@@ -71,6 +71,8 @@ if typing.TYPE_CHECKING:
     from .auth import Auth, Unauthorized
 
 MAX_WEBSOCKET_MESSAGE_SIZE = 201 * 1024 * 1024
+# Marks a 403 from /api/init caused by the session cookie's app session being unavailable.
+SESSION_REJECTED_HEADER = "X-Writer-Session-Rejected"
 BLUEPRINT_API_EXECUTION_TIMEOUT_SECONDS = int(os.getenv("AGENT_BUILDER_BLUEPRINT_API_EXECUTION_TIMEOUT", "600"))
 BLUEPRINT_API_RETRY_TIMEOUT = int(os.getenv("AGENT_BUILDER_BLUEPRINT_API_RETRY_TIMEOUT", "10000"))
 
@@ -377,7 +379,8 @@ def get_asgi_app(
             response.delete_cookie("session")
 
         if status == "error" or app_response.payload is None:
-            raise HTTPException(status_code=403, detail="Session rejected.")
+            headers = {SESSION_REJECTED_HEADER: "1"} if session_id is not None else None
+            raise HTTPException(status_code=403, detail="Session rejected.", headers=headers)
 
         if serve_mode == "run":
             return _get_run_starter_pack(app_response.payload)
