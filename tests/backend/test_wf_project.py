@@ -264,3 +264,39 @@ def test_wf_project_saver_process_survives_invalid_component_id():
             assert context.write_files_async_process.is_alive()
         finally:
             wf_project.shutdown_process_write_files_async(context)
+
+
+def test_wf_project_saver_retries_failed_save(monkeypatch):
+    import queue
+    import threading
+
+    calls = []
+
+    def flaky_write_files(app_path, metadata, components, context):
+        calls.append(components)
+        if len(calls) == 1:
+            raise OSError("disk temporarily unavailable")
+
+    monkeypatch.setattr(wf_project, "write_files", flaky_write_files)
+    context = wf_project.WfProjectContext(app_path="unused")
+    context.write_files_async_queue = queue.Queue()
+    context.file_hashes["stale"] = "hash"
+    stop_event = threading.Event()
+    components = _components_with_page_id("page-1")
+    context.write_files_async_queue.put(("unused", {}, components))
+    worker = threading.Thread(
+        target=wf_project._start_process_write_files_async_process, args=(context, 0.01, stop_event)
+    )
+    worker.start()
+    try:
+        deadline = time.time() + 5
+        while len(calls) < 2 and time.time() < deadline:
+            time.sleep(0.01)
+        time.sleep(0.1)
+    finally:
+        stop_event.set()
+        worker.join()
+
+    assert len(calls) == 2
+    assert calls[1] is components
+    assert context.file_hashes == {}

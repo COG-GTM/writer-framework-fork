@@ -327,6 +327,9 @@ def _order_components(components: Dict[str, ComponentDefinition]) -> List[Compon
 
 
 def _start_process_write_files_async_process(context: WfProjectContext, save_interval, stop_event):
+    logger = logging.getLogger("writer")
+    pending = None
+    pending_failed = False
     while True:
         if stop_event.is_set():
             break
@@ -337,11 +340,24 @@ def _start_process_write_files_async_process(context: WfProjectContext, save_int
             obj = None
 
         if obj is not None:
-            app_path, metadata, components = obj
+            pending = obj
+            pending_failed = False
+
+        if pending is not None:
+            app_path, metadata, components = pending
             try:
                 write_files(app_path, metadata, components, context)
+                if pending_failed:
+                    logger.info("Project files saved after a previous failure.")
+                pending = None
+            except InvalidComponentIdError:
+                logger.exception("Couldn't save project files.")
+                pending = None
             except Exception:
-                logging.getLogger("writer").exception("Couldn't save project files.")
+                # Kept pending and retried on the next tick unless a newer save supersedes it.
+                if not pending_failed:
+                    logger.exception("Couldn't save project files. Retrying.")
+                pending_failed = True
                 context.file_hashes.clear()
 
         time.sleep(save_interval)
