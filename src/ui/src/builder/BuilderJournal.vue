@@ -292,6 +292,7 @@ async function loadEntries() {
 				method: "POST",
 				headers: {
 					"Content-Type": "application/json",
+					"X-Writer-Session-Id": wf.getSessionId(),
 				},
 				body: JSON.stringify({
 					key_contains: "wf-journal-",
@@ -302,6 +303,7 @@ async function loadEntries() {
 				method: "POST",
 				headers: {
 					"Content-Type": "application/json",
+					"X-Writer-Session-Id": wf.getSessionId(),
 				},
 				body: JSON.stringify({
 					key_contains: "wf-init-logs-",
@@ -354,6 +356,7 @@ async function deleteEntries() {
 				method: "POST",
 				headers: {
 					"Content-Type": "application/json",
+					"X-Writer-Session-Id": wf.getSessionId(),
 				},
 				body: JSON.stringify({
 					keys: Object.keys(filteredEntries.value),

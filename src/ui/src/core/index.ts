@@ -1162,6 +1162,7 @@ export function generateCore() {
 		getSupportedComponentTypes,
 		getContainableTypes,
 		sessionTimestamp: readonly(sessionTimestamp),
+		getSessionId: () => sessionId,
 		userState: readonly(userState),
 		userStateInitial: readonly(userStateInitial),
 		isChildOf,
