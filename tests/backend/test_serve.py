@@ -1,3 +1,4 @@
+import contextlib
 import json
 import mimetypes
 from typing import Any
@@ -423,9 +424,20 @@ class TestEditRouteOriginCheck:
         monkeypatch.setattr(writer.serve.AppRunner, "import_zip", fake_import_zip)
         return calls
 
-    def _client(self, mode="edit", base_url=LOCAL_URL, **kwargs):
+    LOOPBACK_PEER = ("127.0.0.1", 50000)
+    REMOTE_PEER = ("203.0.113.7", 50000)
+
+    @pytest.fixture(autouse=True)
+    def _clients(self):
+        with contextlib.ExitStack() as stack:
+            self._stack = stack
+            yield
+
+    def _client(self, mode="edit", base_url=LOCAL_URL, peer=LOOPBACK_PEER, **kwargs):
         asgi_app = writer.serve.get_asgi_app(test_app_dir, mode, **kwargs)
-        return fastapi.testclient.TestClient(asgi_app, base_url=base_url)
+        client = fastapi.testclient.TestClient(asgi_app, base_url=base_url, client=peer)
+        # Entering the client runs the lifespan, which shuts the app runner down on exit
+        return self._stack.enter_context(client)
 
     def test_import_accepts_local_origin(self, import_calls):
         res = self._client().post("/api/import", files=self.ZIP_FILE, headers={"Origin": self.LOCAL_URL})
@@ -450,7 +462,7 @@ class TestEditRouteOriginCheck:
         assert import_calls == []
 
     def test_import_allows_any_origin_with_remote_edit(self, import_calls):
-        client = self._client(base_url="http://builder.example", enable_remote_edit=True)
+        client = self._client(base_url="http://builder.example", peer=self.REMOTE_PEER, enable_remote_edit=True)
         res = client.post("/api/import", files=self.ZIP_FILE, headers={"Origin": "https://builder.example"})
         assert res.status_code == 200
         assert len(import_calls) == 1
@@ -483,3 +495,51 @@ class TestEditRouteOriginCheck:
     def test_other_edit_routes_reject_cross_site_origin(self, path, body):
         res = self._client().post(path, json=body, headers={"Origin": "https://attacker.example"})
         assert res.status_code == 403
+
+    def test_import_rejects_remote_peer_with_forged_local_headers(self, import_calls):
+        client = self._client(peer=self.REMOTE_PEER)
+        res = client.post("/api/import", files=self.ZIP_FILE, headers={"Origin": "http://localhost"})
+        assert res.status_code == 403
+        assert import_calls == []
+
+    def test_import_rejects_cross_site_fetch_metadata(self, import_calls):
+        res = self._client().post(
+            "/api/import",
+            files=self.ZIP_FILE,
+            headers={"Origin": self.LOCAL_URL, "Sec-Fetch-Site": "cross-site"},
+        )
+        assert res.status_code == 403
+        assert import_calls == []
+
+    def test_import_accepts_ipv6_loopback_peer(self, import_calls):
+        client = self._client(base_url="http://[::1]:4005", peer=("::1", 50000))
+        res = client.post("/api/import", files=self.ZIP_FILE, headers={"Origin": "http://[::1]:4005"})
+        assert res.status_code == 200
+        assert len(import_calls) == 1
+
+    def test_export_rejects_remote_peer_with_forged_local_headers(self):
+        client = self._client(peer=self.REMOTE_PEER)
+        res = client.get("/api/export", headers={"Origin": "http://localhost", "Sec-Fetch-Site": "same-origin"})
+        assert res.status_code == 403
+
+    @pytest.mark.parametrize("peer,origin", [
+        (REMOTE_PEER, "http://localhost"),
+        (LOOPBACK_PEER, "https://attacker.example"),
+        (LOOPBACK_PEER, None),
+    ])
+    def test_init_rejects_non_local_connections(self, peer, origin):
+        headers = {"Origin": origin} if origin else {}
+        res = self._client(peer=peer).post("/api/init", json={"proposedSessionId": None}, headers=headers)
+        assert res.status_code == 403
+
+    @pytest.mark.parametrize("peer,base_url,origin", [
+        (REMOTE_PEER, LOCAL_URL, "http://localhost"),
+        (LOOPBACK_PEER, "http://rebind.attacker.example:4005", "http://localhost"),
+        (LOOPBACK_PEER, LOCAL_URL, "https://attacker.example"),
+    ])
+    def test_stream_rejects_non_local_connections(self, peer, base_url, origin):
+        client = self._client(peer=peer, base_url=base_url)
+        with client.websocket_connect("/api/stream", headers={"Origin": origin}) as websocket:
+            with pytest.raises(fastapi.WebSocketDisconnect) as exc_info:
+                websocket.receive_json()
+        assert exc_info.value.code == 1008

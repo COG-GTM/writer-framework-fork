@@ -3,6 +3,7 @@ import base64
 import html
 import importlib.util
 import io
+import ipaddress
 import json
 import logging
 import mimetypes
@@ -23,6 +24,7 @@ from typing import (
     Callable,
     Dict,
     List,
+    Mapping,
     Optional,
     Set,
     Tuple,
@@ -188,42 +190,51 @@ def get_asgi_app(
 
     cached_extension_paths = _get_extension_paths()
 
-    def _check_origin_header(origin_header: Optional[str]) -> bool:
-        if serve_mode not in ("edit") or enable_remote_edit is True:
+    def _is_local_edit_connection(
+        headers: Mapping[str, str], client_host: Optional[str], allow_missing_origin: bool
+    ) -> bool:
+        """
+        In local edit mode, only connections from the local machine, addressed to a local host
+        name and originating from a local page, are allowed. Checking the peer address means a
+        builder bound to a non-loopback interface (e.g. --host 0.0.0.0) can't be driven remotely
+        by forging the Origin and Host headers.
+        """
+        if serve_mode != "edit" or enable_remote_edit is True:
             return True
+        if not _is_loopback_address(client_host):
+            return False
+        if not _is_local_host(headers.get("host")):
+            return False
+        if headers.get("sec-fetch-site") not in (None, "same-origin", "same-site", "none"):
+            return False
+        origin_header = headers.get("origin")
+        if origin_header is None:
+            return allow_missing_origin
         return _is_local_host(origin_header)
+
+    def _log_rejected_edit_connection(path: str, headers: Mapping[str, str], client_host: Optional[str]) -> None:
+        logging.error(
+            "An edit request to %s from %s with host %s and origin %s was rejected. For security reasons, only "
+            "local requests are allowed in edit mode. To circumvent this protection, use the --enable-remote-edit "
+            "flag if running via command line.",
+            path, client_host, headers.get("host"), headers.get("origin")
+        )
 
     def _verify_edit_request(request: Request) -> None:
         """
-        Guards edit-only HTTP routes against cross-site requests (CSRF) and DNS rebinding.
+        Guards edit-only HTTP routes against cross-site requests (CSRF), DNS rebinding and remote clients.
         """
         if serve_mode != "edit":
             raise HTTPException(status_code=403, detail={"summary": "Invalid mode. Expected 'edit'"})
-        if enable_remote_edit is True:
-            return
 
-        host_header = request.headers.get("host")
-        origin_header = request.headers.get("origin")
-        fetch_site = request.headers.get("sec-fetch-site")
-
-        if not _is_local_host(host_header):
-            is_allowed = False
-        elif origin_header is not None:
-            is_allowed = _is_local_host(origin_header)
-        else:
-            # Browsers omit Origin on same-origin GET requests
-            is_allowed = request.method in ("GET", "HEAD") and fetch_site in (None, "same-origin", "none")
-
-        if not is_allowed:
-            logging.error(
-                "An edit request to %s with host %s and origin %s was rejected. For security reasons, only local "
-                "requests are allowed in edit mode. To circumvent this protection, use the --enable-remote-edit flag "
-                "if running via command line.",
-                request.url.path, host_header, origin_header
-            )
+        client_host = request.client.host if request.client else None
+        # Browsers omit Origin on same-origin GET requests
+        allow_missing_origin = request.method in ("GET", "HEAD")
+        if not _is_local_edit_connection(request.headers, client_host, allow_missing_origin):
+            _log_rejected_edit_connection(request.url.path, request.headers, client_host)
             raise HTTPException(
                 status_code=403,
-                detail={"summary": "Incorrect origin. Only local origins are allowed in edit mode."}
+                detail={"summary": "Incorrect origin. Only local requests are allowed in edit mode."}
             )
 
     edit_router = APIRouter(dependencies=[Depends(_verify_edit_request)])
@@ -371,11 +382,9 @@ def get_asgi_app(
         Handles session init and provides a "starter pack" to the frontend.
         """
 
-        origin_header = request.headers.get("origin")
-        if not _check_origin_header(origin_header):
-            wrong_origin_message = "A session request with origin %s was rejected. For security reasons, only local origins are allowed in edit mode. "
-            wrong_origin_message += "To circumvent this protection, use the --enable-remote-edit flag if running via command line."
-            logging.error(wrong_origin_message, origin_header)
+        client_host = request.client.host if request.client else None
+        if not _is_local_edit_connection(request.headers, client_host, allow_missing_origin=False):
+            _log_rejected_edit_connection(request.url.path, request.headers, client_host)
             raise HTTPException(
                 status_code=403, detail="Incorrect origin. Only local origins are allowed."
             )
@@ -929,8 +938,9 @@ def get_asgi_app(
 
         await websocket.accept()
 
-        origin_header = websocket.headers.get("origin")
-        if not _check_origin_header(origin_header):
+        client_host = websocket.client.host if websocket.client else None
+        if not _is_local_edit_connection(websocket.headers, client_host, allow_missing_origin=False):
+            _log_rejected_edit_connection(websocket.url.path, websocket.headers, client_host)
             await websocket.close(code=1008)
             return
 
@@ -1032,6 +1042,15 @@ def print_init_message():
 
 
 WRITER FRAMEWORK v{VERSION}""")
+
+
+def _is_loopback_address(address: Optional[str]) -> bool:
+    if not address:
+        return False
+    try:
+        return ipaddress.ip_address(address).is_loopback
+    except ValueError:
+        return False
 
 
 def _is_local_host(value: Optional[str]) -> bool:
