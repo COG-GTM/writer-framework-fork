@@ -1,5 +1,7 @@
 import asyncio
+import binascii
 import dataclasses
+import hmac
 import logging
 import os.path
 import time
@@ -121,12 +123,18 @@ class BasicAuth(Auth):
                 if scheme != 'Basic':
                     return HTMLResponse("", status.HTTP_401_UNAUTHORIZED, {"WWW-Authenticate": "Basic"})
 
-                username, password = base64.b64decode(data).decode().split(':', 1)
+                try:
+                    username, password = base64.b64decode(data).decode().split(':', 1)
+                except (ValueError, binascii.Error):
+                    raise Unauthorized()
+
+                login_ok = hmac.compare_digest(username.encode(), self.login.encode())
+                password_ok = hmac.compare_digest(password.encode(), self.password.encode())
+                if not (login_ok and password_ok):
+                    raise Unauthorized()
+
                 if self.callback_func:
                     self.callback_func(request, session_id, {'username': username})
-                else:
-                    if username != self.login or password != self.password:
-                        raise Unauthorized()
 
                 return await call_next(request)
             except Unauthorized as exc:

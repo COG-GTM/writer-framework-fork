@@ -72,3 +72,55 @@ class TestAuth:
     ])
     def test_urljoin_scenarios(self, path1: str, path2, expected_path: str):
         assert auth.urljoin(path1, path2) == expected_path
+
+
+class TestBasicAuthCallback:
+
+    def _app(self, callback):
+        app = fastapi.FastAPI()
+
+        @app.get("/")
+        def index():
+            return {"ok": True}
+
+        auth.BasicAuth(login="admin", password="secret", delay_after_failure=0, block_user_after_failure=False).register(app, callback=callback)
+        return app
+
+    def test_basicauth_with_callback_should_reject_wrong_password(self):
+        calls = []
+        app = self._app(lambda request, session_id, userinfo: calls.append(userinfo))
+        with fastapi.testclient.TestClient(app) as client:
+            res = client.get("/", auth=("admin", "wrong"))
+            assert res.status_code == 401
+        assert calls == []
+
+    def test_basicauth_with_callback_should_reject_wrong_login(self):
+        app = self._app(lambda request, session_id, userinfo: None)
+        with fastapi.testclient.TestClient(app) as client:
+            res = client.get("/", auth=("mallory", "secret"))
+            assert res.status_code == 401
+
+    def test_basicauth_with_callback_should_call_callback_after_valid_credentials(self):
+        calls = []
+        app = self._app(lambda request, session_id, userinfo: calls.append(userinfo))
+        with fastapi.testclient.TestClient(app) as client:
+            res = client.get("/", auth=("admin", "secret"))
+            assert res.status_code == 200
+        assert calls == [{"username": "admin"}]
+
+    def test_basicauth_with_callback_can_still_reject_valid_credentials(self):
+        def callback(request, session_id, userinfo):
+            raise auth.Unauthorized()
+
+        app = self._app(callback)
+        with fastapi.testclient.TestClient(app) as client:
+            res = client.get("/", auth=("admin", "secret"))
+            assert res.status_code == 401
+
+    def test_basicauth_should_reject_malformed_authorization_header(self):
+        app = self._app(None)
+        with fastapi.testclient.TestClient(app) as client:
+            res = client.get("/", headers={"Authorization": "Basic !!!notbase64"})
+            assert res.status_code == 401
+            res = client.get("/", headers={"Authorization": "Basic YWRtaW4="})
+            assert res.status_code == 401
