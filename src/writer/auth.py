@@ -243,11 +243,14 @@ class Oidc(Auth):
         @asgi_app.get('/' + urlstrip(self.callback_authorize))
         async def route_callback(request: Request):
             # Each callback gets its own session so concurrent logins can't swap tokens across an await.
-            with new_oauth_session() as oauth:
-                oauth.fetch_token(url=self.url_oauthtoken, authorization_response=str(request.url))
-                userinfo = {}
-                if self.url_userinfo:
-                    userinfo = oauth.get(self.url_userinfo).json()
+            def exchange_code_for_userinfo(authorization_response: str) -> dict:
+                with new_oauth_session() as oauth:
+                    oauth.fetch_token(url=self.url_oauthtoken, authorization_response=authorization_response)
+                    if not self.url_userinfo:
+                        return {}
+                    return oauth.get(self.url_userinfo).json()
+
+            userinfo = await asyncio.to_thread(exchange_code_for_userinfo, str(request.url))
 
             try:
                 host_url_path = urlpath(self.host_url)
