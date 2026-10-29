@@ -10,7 +10,7 @@ import threading
 import time
 from abc import ABCMeta, abstractmethod
 from collections import OrderedDict
-from typing import Callable, List, Optional, Sequence, Tuple, Union
+from typing import Callable, Hashable, List, Optional, Sequence, Tuple, Union
 from urllib.parse import urlparse
 
 from authlib.integrations.requests_client.oauth2_session import OAuth2Session  # type: ignore
@@ -45,7 +45,7 @@ class FailedAttempts:
         self.window = window
         self.limit = limit
         self.max_entries = max_entries
-        self._entries: "OrderedDict[str, Tuple[float, int]]" = OrderedDict()
+        self._entries: "OrderedDict[Hashable, Tuple[float, int]]" = OrderedDict()
         self._lock = threading.Lock()
 
     def __len__(self) -> int:
@@ -54,7 +54,7 @@ class FailedAttempts:
     def __contains__(self, key: object) -> bool:
         return key in self._entries
 
-    def record(self, key: str, now: Optional[float] = None) -> None:
+    def record(self, key: Hashable, now: Optional[float] = None) -> None:
         now = time.time() if now is None else now
         with self._lock:
             self._prune(now)
@@ -66,7 +66,7 @@ class FailedAttempts:
             while len(self._entries) > self.max_entries:
                 self._entries.popitem(last=False)
 
-    def retry_after(self, key: str, now: Optional[float] = None) -> float:
+    def retry_after(self, key: Hashable, now: Optional[float] = None) -> float:
         """
         Seconds the key still has to wait before its next attempt (0 if it may try now).
         """
@@ -560,13 +560,13 @@ def urlstrip(url_path: str):
     """
     return url_path.strip('/')
 
-def _username_key(username: str, client_ip: str, recent_logins: RecentLogins) -> str:
+def _username_key(username: str, client_ip: str, recent_logins: RecentLogins) -> Union[str, Tuple[str, str]]:
     """
     Key of the per-username failure counter: shared by all clients, except clients that recently
     logged in with this username, which are counted separately so others cannot lock them out.
     """
     if recent_logins.contains(username, client_ip):
-        return f"{username}\x00{client_ip}"
+        return (username, client_ip)
     return username
 
 

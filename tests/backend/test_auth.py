@@ -156,6 +156,17 @@ class TestBasicAuthBruteForce:
         assert client.get("/ping", auth=("admin", "wrong3")).status_code == 429
         assert client.basic_auth.failed_attempts_per_username.retry_after("admin") == 0
 
+    def test_known_client_counter_cannot_be_hit_through_a_crafted_username(self):
+        client = _basicauth_client(delay_after_failure=0, max_failures_per_username=2)
+        assert client.get("/ping", auth=("admin", "admin")).status_code == 200
+        known_key = auth._username_key("admin", "testclient", client.basic_auth.recent_logins)
+
+        for _ in range(3):
+            client.get("/ping", auth=("admin\x00testclient", "wrong"))
+
+        assert client.basic_auth.failed_attempts_per_username.retry_after(known_key) == 0
+        assert client.get("/ping", auth=("admin", "admin")).status_code == 200
+
     def test_per_username_limit_still_applies_to_other_clients_of_a_known_user(self):
         client = _basicauth_client(delay_after_failure=0, max_failures_per_username=2)
         client.basic_auth.recent_logins.add("admin", "198.51.100.1")
