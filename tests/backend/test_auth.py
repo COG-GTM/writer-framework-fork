@@ -107,8 +107,12 @@ def _oidc_app(callback=None):
     asgi_app = fastapi.FastAPI()
     asgi_app.state.app_runner = _FakeAppRunner()
 
+    asgi_app.state.reject_init = False
+
     @asgi_app.post("/api/init")
     async def init():
+        if asgi_app.state.reject_init:
+            raise fastapi.HTTPException(status_code=403, detail="Session rejected.")
         return {"ok": True}
 
     @asgi_app.websocket("/api/stream")
@@ -189,6 +193,22 @@ class TestOidcAuth:
             res = client.post("/api/init", follow_redirects=False)
             assert res.status_code == 307
             assert session_id not in oidc.issued_sessions
+
+    def test_oidc_should_force_new_login_when_app_session_is_gone(self):
+        asgi_app, oidc = _oidc_app()
+        with fastapi.testclient.TestClient(asgi_app, base_url="https://app.example.com") as client:
+            session_id = self._issued_session(client)
+            client.cookies.set("session", session_id)
+            asgi_app.state.reject_init = True
+            res = client.post("/api/init", follow_redirects=False)
+            assert res.status_code == 403
+            assert 'session=""' in res.headers["set-cookie"]
+            assert not oidc.is_session_issued(session_id)
+
+            client.cookies.set("session", session_id)
+            res = client.get("/", follow_redirects=False)
+            assert res.status_code == 307
+            assert res.headers["location"].startswith("https://idp.example.com/authorize")
 
     def _issued_session(self, client) -> str:
         res = client.get("/authorize?code=abc&state=xyz", follow_redirects=False)

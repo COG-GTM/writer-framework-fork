@@ -234,6 +234,10 @@ class Oidc(Auth):
             is_one_of_url_prefix_allowed = any(request.url.path.startswith(url_prefix) for url_prefix in auth_authorized_prefix_paths)
             if self.is_session_issued(session) or request.url.path in auth_authorized_routes or is_one_of_url_prefix_allowed:
                 response: Response = await call_next(request)
+                if session is not None and request.url.path.endswith("/api/init") and response.status_code == 403:
+                    # The app session behind this login is gone (restart, pruning): force a fresh login.
+                    self.issued_sessions.pop(session, None)
+                    response.delete_cookie("session")
                 return response
             else:
                 url = self.authlib.create_authorization_url(self.url_authorize)
