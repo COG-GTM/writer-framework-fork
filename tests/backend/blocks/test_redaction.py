@@ -91,3 +91,19 @@ def test_redact_body_keeps_json_valid():
     }
     assert redact_body(body, ["unrelated"]) == body
     assert redact_body("plain secret-value text", ["secret-value"]) == "plain " + REDACTED + " text"
+
+
+def test_redact_url_masks_credential_query_params_without_known_secrets():
+    url = "https://api.example.com/v1?api_key=abc123secret&q=duck&access_token=t0k"
+    redacted = redact_url(url, [])
+    assert "abc123secret" not in redacted
+    assert "t0k" not in redacted
+    assert "q=duck" in redacted
+    assert redact_url("https://api.example.com/v1?q=duck", []) == "https://api.example.com/v1?q=duck"
+
+
+def test_redact_body_keeps_colliding_json_keys():
+    body = json.dumps({"abcd": "first", "[REDACTED]": "second"})
+    redacted = json.loads(redact_body(body, ["abcd"]))
+    assert sorted(redacted.values()) == ["first", "second"]
+    assert "abcd" not in json.dumps(redacted)

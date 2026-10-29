@@ -6,7 +6,7 @@ import json
 import os
 import re
 from typing import Any, Callable, Iterable, List, Mapping, Optional, Set
-from urllib.parse import quote, quote_plus, unquote, unquote_plus
+from urllib.parse import quote, quote_plus, unquote, unquote_plus, urlsplit, urlunsplit
 
 REDACTED = "[REDACTED]"
 
@@ -119,6 +119,31 @@ def redact_headers(headers: Mapping[str, Any], secrets: Iterable[str] = ()) -> d
     return redacted
 
 
+def _redact_sensitive_query_params(url: str) -> str:
+    """
+    Redacts the values of query parameters whose names look like credentials
+    (``api_key``, ``token``, ...) even when they aren't known secrets.
+    """
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return url
+    if not parts.query:
+        return url
+    pairs = []
+    changed = False
+    for pair in parts.query.split("&"):
+        name, sep, value = pair.partition("=")
+        if sep and value and is_sensitive_header(unquote_plus(name)):
+            pairs.append(f"{name}={quote(REDACTED, safe='')}")
+            changed = True
+        else:
+            pairs.append(pair)
+    if not changed:
+        return url
+    return urlunsplit(parts._replace(query="&".join(pairs)))
+
+
 def redact_url(url: str, secrets: Iterable[str]) -> str:
     """
     Redacts secrets from a URL regardless of how they were percent-encoded
@@ -126,7 +151,8 @@ def redact_url(url: str, secrets: Iterable[str]) -> str:
     when a secret is found that way.
     """
     secrets = list(secrets)
-    redacted = redact_text(url, secrets) or ""
+    redacted = _redact_sensitive_query_params(url)
+    redacted = redact_text(redacted, secrets) or ""
     for decode in (unquote, unquote_plus):
         decoded = decode(redacted)
         cleaned = redact_text(decoded, secrets)
@@ -147,7 +173,15 @@ def redact_json_value(value: Any, secrets: Iterable[str]) -> Any:
 
 def _redact_json_value(value: Any, secrets: List[str]) -> Any:
     if isinstance(value, dict):
-        return {redact_text(k, secrets): _redact_json_value(v, secrets) for k, v in value.items()}
+        redacted = {}
+        for k, v in value.items():
+            key = redact_text(k, secrets)
+            if key != k:
+                base, n = key, 2
+                while key in value or key in redacted:
+                    key, n = f"{base}#{n}", n + 1
+            redacted[key] = _redact_json_value(v, secrets)
+        return redacted
     if isinstance(value, list):
         return [_redact_json_value(v, secrets) for v in value]
     if isinstance(value, str):

@@ -261,3 +261,22 @@ def test_secrets_reflected_in_error_response_are_redacted(session, runner, monke
     assert block.result["body"] == "bad token: Bearer [REDACTED]"
     assert VAULT_SECRET not in str(excinfo.value)
     assert "[REDACTED]" in str(excinfo.value)
+
+
+def test_shared_client_redacts_secrets_of_the_executing_block(session, runner, monkeypatch):
+    import writer.blueprints
+
+    creator = HTTPRequest(session.add_fake_component({"url": "https://a"}, id="creator"), runner, {})
+    other = HTTPRequest(
+        session.add_fake_component({"url": "https://b"}, id="other"),
+        runner,
+        {"vault": {"OTHER_KEY": VAULT_SECRET}},
+    )
+    client = creator.create_httpx_client(transport=httpx.MockTransport(_reflecting_handler))
+    with writer.blueprints.use_current_block(other):
+        client.get("https://api.example.com/json", headers={"X-Trace": VAULT_SECRET})
+
+    logged = json.dumps(creator.execution_environment.get("httpx_requests", []))
+    logged += json.dumps(other.execution_environment.get("httpx_requests", []))
+    assert VAULT_SECRET not in logged
+    assert "[REDACTED]" in logged

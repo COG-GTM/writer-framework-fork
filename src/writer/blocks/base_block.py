@@ -107,8 +107,23 @@ class BlueprintBlock:
             self.execution_environment.get("vault"), self.component.content.values(), resolve
         )
 
+    def _get_active_secret_values(self) -> List[str]:
+        """
+        Secrets of this block plus those of the block currently executing,
+        which differs when an HTTP client is shared between blocks.
+        """
+        secrets = set(self._get_secret_values())
+        try:
+            from writer.blueprints import get_current_block
+            current_block = get_current_block()
+            if current_block is not None and current_block is not self:
+                secrets.update(current_block._get_secret_values())
+        except Exception:
+            pass
+        return sorted(secrets, key=len, reverse=True)
+
     def _redact_logged_content(self, content: Optional[str]) -> Optional[str]:
-        return redact_body(content, self._get_secret_values())
+        return redact_body(content, self._get_active_secret_values())
 
     def _set_state(self, expr: str, value: Any):
         self.evaluator.set_state(
@@ -316,7 +331,7 @@ class BlueprintBlock:
                 else:
                     content = None
 
-                secrets = block._get_secret_values()
+                secrets = block._get_active_secret_values()
                 log_entry = {
                     'id': request_id,
                     'created_at': dt.datetime.now(dt.timezone.utc).isoformat(),
@@ -341,7 +356,7 @@ class BlueprintBlock:
                     # Unlikely scenario
                     return
 
-                secrets = block._get_secret_values()
+                secrets = block._get_active_secret_values()
                 log_entry['response'] = {
                     'status_code': response.status_code,
                     'url': redact_url(str(response.url), secrets),
