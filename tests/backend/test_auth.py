@@ -6,10 +6,10 @@ import fastapi.testclient
 import pytest
 import requests
 from authlib.oauth2.rfc7636 import create_s256_code_challenge
-import writer.serve
-from writer import auth
 
+import writer.serve
 from tests.backend import test_basicauth_dir
+from writer import auth
 
 
 class TestAuth:
@@ -102,7 +102,7 @@ class _FakeIdentityProvider:
         response.status_code = 200
         response.headers["Content-Type"] = "application/json"
         if url == "https://idp.example.com/token":
-            self.token_requests.append(dict(parse_qsl(data)))
+            self.token_requests.append(data if isinstance(data, dict) else dict(parse_qsl(data or "")))
             response._content = json.dumps(self.token_response).encode()
         elif url == "https://idp.example.com/userinfo":
             response._content = json.dumps({"email": "user@example.com"}).encode()
@@ -114,7 +114,10 @@ class _FakeIdentityProvider:
 @pytest.fixture
 def idp(monkeypatch):
     provider = _FakeIdentityProvider()
-    monkeypatch.setattr(requests.Session, "request", provider.request)
+    def fake_request(session, method, url, data=None, **kwargs):
+        return provider.request(session, method, url, data=data, **kwargs)
+
+    monkeypatch.setattr(requests.Session, "request", fake_request)
     return provider
 
 
