@@ -303,37 +303,56 @@ def get_asgi_app(
             agent_token_header
             )
 
-    @app.post("/api/data/retrieve")
-    async def retrieve_data(requestBody: RetrieveDataRequestBody) -> RetrieveDataResponseBody:
-        from writer.keyvalue_storage import writer_kv_storage
+    async def _verify_builder_data_request(request: Request) -> None:
+        if not _check_origin_header(request.headers.get("origin")):
+            raise HTTPException(status_code=403, detail="Incorrect origin. Only local origins are allowed.")
+        session_id = request.headers.get("x-writer-session-id")
+        if not session_id or not await app_runner.check_session(session_id):
+            raise HTTPException(status_code=401, detail="A valid builder session is required.")
 
-        all_keys = writer_kv_storage.get_data_keys()
+    if serve_mode == "edit":
+        from writer.journal import is_builder_data_key
 
-        keys_to_fetch = []
-        for key in all_keys:
-            if key in requestBody.skip_keys:
-                continue
-            if requestBody.key_contains and requestBody.key_contains not in key:
-                continue
-            keys_to_fetch.append(key)
-        
-        async def fetch_value(key: str):
-            return key, await asyncio.to_thread(writer_kv_storage.get, key, "data")
+        @app.post("/api/data/retrieve")
+        async def retrieve_data(requestBody: RetrieveDataRequestBody, request: Request) -> RetrieveDataResponseBody:
+            from writer.keyvalue_storage import writer_kv_storage
 
-        kv_pairs = await asyncio.gather(*(fetch_value(key) for key in keys_to_fetch))
+            await _verify_builder_data_request(request)
 
-        return RetrieveDataResponseBody(result={k: v["data"] for k, v in kv_pairs})
+            all_keys = writer_kv_storage.get_data_keys()
 
-    @app.post("/api/data/delete")
-    async def delete_data(requestBody: DeleteDataRequestBody) -> None:
-        from writer.keyvalue_storage import writer_kv_storage
+            keys_to_fetch = []
+            for key in all_keys:
+                if not is_builder_data_key(key):
+                    continue
+                if key in requestBody.skip_keys:
+                    continue
+                if requestBody.key_contains and requestBody.key_contains not in key:
+                    continue
+                keys_to_fetch.append(key)
 
-        async def delete_key(key: str):
-            return key, await asyncio.to_thread(writer_kv_storage.delete, key)
+            async def fetch_value(key: str):
+                return key, await asyncio.to_thread(writer_kv_storage.get, key, "data")
 
-        await asyncio.gather(*(delete_key(key) for key in requestBody.keys))
+            kv_pairs = await asyncio.gather(*(fetch_value(key) for key in keys_to_fetch))
 
-        return None
+            return RetrieveDataResponseBody(result={k: v["data"] for k, v in kv_pairs})
+
+        @app.post("/api/data/delete")
+        async def delete_data(requestBody: DeleteDataRequestBody, request: Request) -> None:
+            from writer.keyvalue_storage import writer_kv_storage
+
+            await _verify_builder_data_request(request)
+
+            if not all(is_builder_data_key(key) for key in requestBody.keys):
+                raise HTTPException(status_code=400, detail="Only execution history keys can be deleted.")
+
+            async def delete_key(key: str):
+                return key, await asyncio.to_thread(writer_kv_storage.delete, key)
+
+            await asyncio.gather(*(delete_key(key) for key in requestBody.keys))
+
+            return None
 
     @app.post("/api/init")
     async def init(

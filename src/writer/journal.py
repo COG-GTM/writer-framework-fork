@@ -1,6 +1,7 @@
 import contextlib
 import json
 import logging
+import re
 from contextvars import ContextVar
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -19,6 +20,14 @@ logger = logging.getLogger("journal")
 
 JOURNAL_KEY_PREFIX = "wf-journal-"
 INIT_LOGS_KEY_PREFIX = "wf-init-logs-"
+_BUILDER_DATA_KEY_PATTERN = re.compile(
+    rf"(?:{re.escape(JOURNAL_KEY_PREFIX)}|{re.escape(INIT_LOGS_KEY_PREFIX)})[A-Za-z0-9_-]+"
+)
+
+
+def is_builder_data_key(key: object) -> bool:
+    return isinstance(key, str) and _BUILDER_DATA_KEY_PATTERN.fullmatch(key) is not None
+
 
 class JournalRecord:
     def __init__(

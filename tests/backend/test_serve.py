@@ -406,3 +406,117 @@ class TestServe:
             response_json = res.json()
             assert response_json["status"] == "error"
             assert "Project saver process is not running" in response_json["message"]
+
+
+class TestBuilderDataRoutes:
+    LOCAL_ORIGIN = {"Origin": "http://localhost:4005"}
+
+    @pytest.fixture
+    def kv_storage(self, monkeypatch):
+        from writer.keyvalue_storage import writer_kv_storage
+
+        store = {
+            "wf-journal-u-1700000000000": {"data": {"blockOutputs": {"b1": "secret output"}}},
+            "wf-init-logs-u-1700000000001": {"data": {"logs": []}},
+            "customer-records": {"data": {"ssn": "123-45-6789"}},
+        }
+        calls: dict = {"keys": 0, "get": [], "delete": []}
+
+        def get_data_keys():
+            calls["keys"] += 1
+            return list(store.keys())
+
+        def get(key, type_):
+            calls["get"].append(key)
+            return store[key]
+
+        def delete(key):
+            calls["delete"].append(key)
+            store.pop(key, None)
+            return {}
+
+        monkeypatch.setattr(writer_kv_storage, "get_data_keys", get_data_keys)
+        monkeypatch.setattr(writer_kv_storage, "get", get)
+        monkeypatch.setattr(writer_kv_storage, "delete", delete)
+        return store, calls
+
+    @staticmethod
+    def _init_session(client) -> str:
+        res = client.post("/api/init", json={"proposedSessionId": None}, headers={
+            "Content-Type": "application/json",
+            "Origin": "http://localhost:4005",
+        })
+        assert res.status_code == 200
+        return res.json()["sessionId"]
+
+    def test_routes_not_registered_in_run_mode(self, kv_storage) -> None:
+        _, calls = kv_storage
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "run")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            session_id = self._init_session(client)
+            headers = {"X-Writer-Session-Id": session_id}
+            assert client.post("/api/data/retrieve", json={}, headers=headers).status_code == 404
+            assert client.post(
+                "/api/data/delete", json={"keys": ["wf-journal-u-1700000000000"]}, headers=headers
+            ).status_code == 404
+        assert calls == {"keys": 0, "get": [], "delete": []}
+
+    @pytest.mark.parametrize("session_header", [None, "", "not-a-real-session"])
+    def test_edit_mode_requires_valid_session(self, kv_storage, session_header) -> None:
+        _, calls = kv_storage
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "edit")
+        headers = dict(self.LOCAL_ORIGIN)
+        if session_header is not None:
+            headers["X-Writer-Session-Id"] = session_header
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            assert client.post("/api/data/retrieve", json={}, headers=headers).status_code == 401
+            assert client.post(
+                "/api/data/delete", json={"keys": ["wf-journal-u-1700000000000"]}, headers=headers
+            ).status_code == 401
+        assert calls == {"keys": 0, "get": [], "delete": []}
+
+    @pytest.mark.parametrize("origin", [None, "https://evil.example"])
+    def test_edit_mode_rejects_foreign_origin(self, kv_storage, origin) -> None:
+        _, calls = kv_storage
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "edit")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            session_id = self._init_session(client)
+            headers = {"X-Writer-Session-Id": session_id}
+            if origin is not None:
+                headers["Origin"] = origin
+            assert client.post("/api/data/retrieve", json={}, headers=headers).status_code == 403
+            assert client.post(
+                "/api/data/delete", json={"keys": ["wf-journal-u-1700000000000"]}, headers=headers
+            ).status_code == 403
+        assert calls == {"keys": 0, "get": [], "delete": []}
+
+    def test_retrieve_returns_only_execution_history(self, kv_storage) -> None:
+        _, calls = kv_storage
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "edit")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            session_id = self._init_session(client)
+            headers = {**self.LOCAL_ORIGIN, "X-Writer-Session-Id": session_id}
+            res = client.post("/api/data/retrieve", json={}, headers=headers)
+            assert res.status_code == 200
+            assert set(res.json()["result"]) == {"wf-journal-u-1700000000000", "wf-init-logs-u-1700000000001"}
+
+            res = client.post("/api/data/retrieve", json={"key_contains": "customer"}, headers=headers)
+            assert res.status_code == 200
+            assert res.json()["result"] == {}
+        assert "customer-records" not in calls["get"]
+
+    def test_delete_is_scoped_to_execution_history(self, kv_storage) -> None:
+        store, calls = kv_storage
+        asgi_app = writer.serve.get_asgi_app(test_app_dir, "edit")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            session_id = self._init_session(client)
+            headers = {**self.LOCAL_ORIGIN, "X-Writer-Session-Id": session_id}
+            for bad_keys in (["customer-records"], ["wf-journal-u-1", "customer-records"], ["wf-journal-../x"]):
+                res = client.post("/api/data/delete", json={"keys": bad_keys}, headers=headers)
+                assert res.status_code == 400
+            assert calls["delete"] == []
+
+            res = client.post("/api/data/delete", json={"keys": ["wf-journal-u-1700000000000"]}, headers=headers)
+            assert res.status_code == 200
+        assert calls["delete"] == ["wf-journal-u-1700000000000"]
+        assert "customer-records" in store
