@@ -301,7 +301,7 @@ class Oidc(Auth):
                 if self.url_userinfo:
                     app_runner.set_userinfo(session_id=session_id, userinfo=userinfo)
 
-                response.set_cookie(key="session", value=session_id, httponly=True)
+                response.set_cookie(key="session", value=session_id, httponly=True, secure=secure_cookies, samesite="lax")
                 clear_login_cookie(response, state)
                 return response
             except Unauthorized as exc:

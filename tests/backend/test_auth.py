@@ -191,6 +191,11 @@ class TestOidcLoginState:
             assert idp.token_requests[0]["code_verifier"] == code_verifier
             assert f"oidc_login_{state}" not in client.cookies
 
+            session_cookie = next(c for c in res.headers.get_list("set-cookie") if c.startswith("session="))
+            assert "HttpOnly" in session_cookie
+            assert "Secure" in session_cookie
+            assert "SameSite=lax" in session_cookie
+
     def test_parallel_logins_should_each_complete(self, idp):
         """
         Two tabs starting a login must not invalidate each other's pending sign-in.
