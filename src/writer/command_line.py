@@ -45,7 +45,7 @@ def run(path: str, host: str, port: Optional[int]):
 @main.command()
 @click.option('--host', default="127.0.0.1", help="Host to run the app on")
 @click.option('--port', default=None, help="Port to run the app on")
-@click.option('--enable-remote-edit', help="Set this flag to allow non-local requests in edit mode.", is_flag=True)
+@click.option('--enable-remote-edit', help="Allow edit mode connections from non-loopback network peers and non-local browser origins. Without it, the editor only accepts local connections, even when --host binds a public interface.", is_flag=True)
 @click.option('--enable-server-setup', help="Set this flag to enable server setup hook in edit mode.", is_flag=True)
 @click.option('--enable-file-buffering', help="Set this flag to enable file buffering in edit mode.", is_flag=True)
 @click.option('--buffer-sync-interval', default=10, type=int, help="Interval in seconds for synchronizing the file buffer.")
@@ -125,7 +125,7 @@ def create(path, template):
 @main.command()
 @click.option('--host', default="127.0.0.1", help="Host to run the app on")
 @click.option('--port', default=None, help="Port to run the app on")
-@click.option('--enable-remote-edit', help="Set this flag to allow non-local requests in edit mode.", is_flag=True)
+@click.option('--enable-remote-edit', help="Allow edit mode connections from non-loopback network peers and non-local browser origins. Without it, the editor only accepts local connections, even when --host binds a public interface.", is_flag=True)
 def hello(port: Optional[int], host: str, enable_remote_edit):
     """Create and run an onboarding 'Hello' app."""
     create_app("hello", template_name="hello", overwrite=True)

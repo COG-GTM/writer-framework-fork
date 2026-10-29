@@ -3,6 +3,7 @@ import base64
 import html
 import importlib.util
 import io
+import ipaddress
 import json
 import logging
 import mimetypes
@@ -39,6 +40,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.routing import Mount
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
+from starlette.datastructures import Address
 from starlette.websockets import WebSocket, WebSocketDisconnect, WebSocketState
 
 import writer
@@ -97,6 +99,18 @@ class WriterFastAPI(FastAPI, WriterAsgi):  # type: ignore
 app: WriterFastAPI = cast(WriterFastAPI, None)
 
 
+def _is_loopback_host(host: Optional[str]) -> bool:
+    if not host:
+        return False
+    try:
+        address = ipaddress.ip_address(host.split("%", 1)[0])
+    except ValueError:
+        return False
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    return address.is_loopback
+
+
 def get_asgi_app(
     user_app_path: str,
     serve_mode: ServeMode,
@@ -114,7 +128,8 @@ def get_asgi_app(
 
     :param user_app_path: writer application path
     :param serve_mode: server mode (run, edit)
-    :param enable_remote_edit: allow editing from the internet (by default, editing only works locally)
+    :param enable_remote_edit: allow edit mode connections from non-loopback network peers and
+        non-local browser origins (by default, editing only works locally)
     :param enable_server_setup: enables fastapi setup hook on startup, server_setup.py
     :param on_load: callback called on loading
     :param on_shutdown: callback called at shutdown
@@ -188,15 +203,44 @@ def get_asgi_app(
 
     cached_extension_paths = _get_extension_paths()
 
+    def _is_edit_access_restricted() -> bool:
+        return serve_mode == "edit" and enable_remote_edit is not True
+
     def _check_origin_header(origin_header: Optional[str]) -> bool:
-        if serve_mode not in ("edit") or enable_remote_edit is True:
+        """
+        CSRF protection for browsers: the Origin header is set by the client,
+        so it must be paired with _check_peer_address for access control.
+        """
+        if not _is_edit_access_restricted():
             return True
         if origin_header is None:
             return False
         hostname = urlsplit(origin_header).hostname
-        if hostname in ("127.0.0.1", "localhost"):
+        if hostname in ("127.0.0.1", "localhost", "::1"):
             return True
         return False
+
+    def _check_peer_address(client: Optional[Address]) -> bool:
+        """
+        In edit mode, only accepts connections whose network peer is a loopback
+        address, unless remote edit has been explicitly enabled.
+        """
+        if not _is_edit_access_restricted():
+            return True
+        return client is not None and _is_loopback_host(client.host)
+
+    def _reject_non_local_peer(client: Optional[Address]) -> None:
+        if _check_peer_address(client):
+            return
+        logging.error(
+            "An edit mode request from %s was rejected. For security reasons, only "
+            "local network peers can use the editor. To allow remote connections, "
+            "use the --enable-remote-edit flag if running via command line.",
+            client.host if client else "an unknown address",
+        )
+        raise HTTPException(
+            status_code=403, detail="Only local connections are allowed in edit mode."
+        )
 
     # Init
 
@@ -255,7 +299,8 @@ def get_asgi_app(
         return {"status": "ok"}
 
     @app.get("/api/export")
-    async def export_zip():
+    async def export_zip(request: Request):
+        _reject_non_local_peer(request.client)
         if serve_mode != "edit":
             raise HTTPException(status_code=403, detail="Invalid mode.")
         exported_zip_stream = app_runner.export_zip()
@@ -268,7 +313,8 @@ def get_asgi_app(
         )
 
     @app.post("/api/import")
-    async def import_zip(file: UploadFile = File(...)):
+    async def import_zip(request: Request, file: UploadFile = File(...)):
+        _reject_non_local_peer(request.client)
         if serve_mode != "edit":
             raise HTTPException(status_code=403, detail={"summary": "Invalid mode. Expected 'edit'"})
         if not file.filename or not file.filename.endswith(".zip"):
@@ -295,6 +341,7 @@ def get_asgi_app(
 
     @app.post("/api/autogen")
     async def autogen(requestBody: AutogenRequestBody, request: Request):
+        _reject_non_local_peer(request.client)
         import writer.autogen
         agent_token_header = request.headers.get('x-agent-token')
 
@@ -304,7 +351,8 @@ def get_asgi_app(
             )
 
     @app.post("/api/data/retrieve")
-    async def retrieve_data(requestBody: RetrieveDataRequestBody) -> RetrieveDataResponseBody:
+    async def retrieve_data(requestBody: RetrieveDataRequestBody, request: Request) -> RetrieveDataResponseBody:
+        _reject_non_local_peer(request.client)
         from writer.keyvalue_storage import writer_kv_storage
 
         all_keys = writer_kv_storage.get_data_keys()
@@ -325,7 +373,8 @@ def get_asgi_app(
         return RetrieveDataResponseBody(result={k: v["data"] for k, v in kv_pairs})
 
     @app.post("/api/data/delete")
-    async def delete_data(requestBody: DeleteDataRequestBody) -> None:
+    async def delete_data(requestBody: DeleteDataRequestBody, request: Request) -> None:
+        _reject_non_local_peer(request.client)
         from writer.keyvalue_storage import writer_kv_storage
 
         async def delete_key(key: str):
@@ -342,6 +391,8 @@ def get_asgi_app(
         """
         Handles session init and provides a "starter pack" to the frontend.
         """
+
+        _reject_non_local_peer(request.client)
 
         origin_header = request.headers.get("origin")
         if not _check_origin_header(origin_header):
@@ -900,6 +951,14 @@ def get_asgi_app(
         """Initialises incoming and outgoing communications on the stream."""
 
         await websocket.accept()
+
+        if not _check_peer_address(websocket.client):
+            logging.error(
+                "An edit mode stream connection from %s was rejected. Only local network peers are allowed.",
+                websocket.client.host if websocket.client else "an unknown address",
+            )
+            await websocket.close(code=1008)
+            return
 
         origin_header = websocket.headers.get("origin")
         if not _check_origin_header(origin_header):
