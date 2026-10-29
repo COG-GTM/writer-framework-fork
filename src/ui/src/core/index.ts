@@ -204,6 +204,7 @@ export function generateCore() {
 			response = await fetch("./api/init", {
 				method: "post",
 				cache: "no-store",
+				redirect: "manual",
 				headers: {
 					"Content-Type": "application/json",
 				},
@@ -211,6 +212,12 @@ export function generateCore() {
 					proposedSessionId: sessionId,
 				}),
 			});
+
+			if (response.type === "opaqueredirect") {
+				// Authentication is required (e.g. OIDC); a full page load follows the login redirect.
+				window.location.reload();
+				return;
+			}
 
 			const bodyText = await response.text();
 			initData = JSON.parse(bodyText);

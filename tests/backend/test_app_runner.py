@@ -60,6 +60,33 @@ class TestAppRunner:
 
     @pytest.mark.asyncio
     @pytest.mark.usefixtures("setup_app_runner")
+    async def test_init_should_not_create_session_when_existing_session_required(
+        self, setup_app_runner
+    ) -> None:
+        ar: AppRunner
+        with setup_app_runner(test_app_dir, "run", load=True) as ar:
+            response = await ar.init_session(
+                InitSessionRequestPayload(
+                    cookies={}, headers={}, proposedSessionId=self.proposed_session_id, requireExistingSession=True
+                )
+            )
+            assert response.status == "error"
+            assert response.payload is None
+            assert await ar.check_session(self.proposed_session_id) is False
+
+            await ar.init_session(
+                InitSessionRequestPayload(cookies={}, headers={}, proposedSessionId=self.proposed_session_id)
+            )
+            response = await ar.init_session(
+                InitSessionRequestPayload(
+                    cookies={}, headers={}, proposedSessionId=self.proposed_session_id, requireExistingSession=True
+                )
+            )
+            assert response.status == "ok"
+            assert response.payload.sessionId == self.proposed_session_id
+
+    @pytest.mark.asyncio
+    @pytest.mark.usefixtures("setup_app_runner")
     async def test_init_should_load_blueprint_component_in_edit_mode(self, setup_app_runner) -> None:
         ar: AppRunner
         with setup_app_runner(test_app_dir, "edit", load=True) as ar:

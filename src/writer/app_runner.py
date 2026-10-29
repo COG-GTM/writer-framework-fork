@@ -162,6 +162,8 @@ class AppProcess(multiprocessing.Process):
             payload.proposedSessionId, restore_initial_mail=True
         )
         if session is None:
+            if payload.requireExistingSession:
+                raise MessageHandlingException("Session rejected.")
             session = writer.session_manager.get_new_session(
                 payload.cookies, payload.headers, payload.proposedSessionId
             )

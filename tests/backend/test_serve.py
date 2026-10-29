@@ -35,6 +35,30 @@ def parse_sse_stream(response):
 
 class TestServe:
 
+    def test_init_should_reject_session_cookie_for_unknown_session(self) -> None:
+        asgi_app: fastapi.FastAPI = writer.serve.get_asgi_app(test_app_dir, "run")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            client.cookies.set("session", "a" * 64)
+            res = client.post("/api/init", json={"proposedSessionId": None})
+            assert res.status_code == 403
+            assert writer.serve.SESSION_REJECTED_HEADER in res.headers
+
+            with client.websocket_connect("/api/stream") as websocket:
+                websocket.send_json({"type": "streamInit", "trackingId": 0, "payload": {"sessionId": "a" * 64}})
+                with pytest.raises(fastapi.WebSocketDisconnect):
+                    websocket.receive_json()
+
+    def test_init_should_resume_existing_session_from_cookie(self) -> None:
+        asgi_app: fastapi.FastAPI = writer.serve.get_asgi_app(test_app_dir, "run")
+        with fastapi.testclient.TestClient(asgi_app) as client:
+            session_id = client.post("/api/init", json={"proposedSessionId": None}).json()["sessionId"]
+
+            client.cookies.set("session", session_id)
+            res = client.post("/api/init", json={"proposedSessionId": None})
+            assert res.status_code == 200
+            assert res.json()["sessionId"] == session_id
+
+
     def test_valid(self) -> None:
         asgi_app: fastapi.FastAPI = writer.serve.get_asgi_app(
             test_app_dir, "run")

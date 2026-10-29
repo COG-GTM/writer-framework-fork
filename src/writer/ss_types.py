@@ -151,6 +151,7 @@ class InitSessionRequestPayload(BaseModel):
     cookies: Optional[Dict[str, str]] = None
     headers: Optional[Dict[str, str]] = None
     proposedSessionId: Optional[str] = None
+    requireExistingSession: bool = False
     additionalMail: list[AdditionalMail] = []
 
 
