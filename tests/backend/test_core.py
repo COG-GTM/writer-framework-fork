@@ -1024,9 +1024,11 @@ class TestStateSerialiser:
             }
         )
         np_nan = s.pop("np_nan")
-        assert isinstance(np_nan, float) and math.isnan(np_nan)
+        assert isinstance(np_nan, float) and not isinstance(np_nan, np.floating)
+        assert math.isnan(np_nan)
         assert s == {"np_float": 1.5, "int_enum": Flag.ON, "inf": math.inf, "none": None}
-        assert not isinstance(s["np_float"], np.floating)
+        assert isinstance(s["np_float"], float) and not isinstance(s["np_float"], np.floating)
+        assert isinstance(s["int_enum"], Flag)
         with pytest.raises(OverflowError):
             self.sts.serialise(10**400)
 
