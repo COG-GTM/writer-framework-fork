@@ -1,3 +1,4 @@
+import enum
 import json
 import math
 import typing
@@ -1008,6 +1009,28 @@ class TestStateSerialiser:
         assert s.get("fav_number") is None  # NaN is serialised as None
         assert s.get("likes_coffee") == True
         assert s.get("likes_black_tea") == False
+
+    def test_scalar_subclasses_and_edge_values(self) -> None:
+        class Flag(enum.IntEnum):
+            ON = 1
+
+        s = self.sts.serialise(
+            {
+                "np_float": np.float64(1.5),
+                "np_nan": np.float64("nan"),
+                "int_enum": Flag.ON,
+                "inf": math.inf,
+                "none": None,
+            }
+        )
+        np_nan = s.pop("np_nan")
+        assert isinstance(np_nan, float) and not isinstance(np_nan, np.floating)
+        assert math.isnan(np_nan)
+        assert s == {"np_float": 1.5, "int_enum": Flag.ON, "inf": math.inf, "none": None}
+        assert isinstance(s["np_float"], float) and not isinstance(s["np_float"], np.floating)
+        assert isinstance(s["int_enum"], Flag)
+        with pytest.raises(OverflowError):
+            self.sts.serialise(10**400)
 
     def test_invalid(self) -> None:
         # A Python module is used as an example of a non-serialisable object
