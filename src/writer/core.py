@@ -299,6 +299,12 @@ class StateSerialiser:
     """
 
     def serialise(self, v: Any) -> Union[Dict, List, str, bool, int, float, None]:
+        v_type = type(v)
+        if v_type is str or v_type is bool or v is None:
+            return v
+        if v_type is int or v_type is float:
+            return None if math.isnan(v) else v
+
         from writer.ai import Conversation
         from writer.core_df import EditableDataFrame
 
